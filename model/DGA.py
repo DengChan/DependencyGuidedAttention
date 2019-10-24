@@ -3,11 +3,25 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 import numpy as np
+import math
 
 from utils import constant, torch_utils
 from model.tree import Tree, head_to_tree, tree_to_adj
 
 MAX_SEQ_LEN = 300
+
+
+def Embedding(num_embeddings, embedding_dim, padding_idx=None):
+    m = nn.Embedding(num_embeddings, embedding_dim, padding_idx=padding_idx)
+    nn.init.normal_(m.weight, mean=0, std=embedding_dim ** -0.5)
+    if padding_idx is not None:
+        nn.init.constant_(m.weight[padding_idx], 0)
+    return m
+
+
+def gelu(x):
+    # return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+    return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
 class InputLayer(nn.Module):
@@ -17,9 +31,9 @@ class InputLayer(nn.Module):
         self.emb_matrix = emb_matrix
 
         # create embedding layers
-        self.emb = nn.Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
-        self.pos_emb = nn.Embedding(len(constant.POS_TO_ID), opt['pos_dim']) if opt['pos_dim'] > 0 else None
-        self.ner_emb = nn.Embedding(len(constant.NER_TO_ID), opt['ner_dim']) if opt['ner_dim'] is not None else None
+        self.emb = Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
+        self.pos_emb = Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID) if opt['pos_dim'] > 0 else None
+        self.ner_emb = Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID) if opt['ner_dim'] is not None else None
 
         self.input_dim = opt["emb_dim"] + opt["pos_dim"] + opt["ner_dim"]
 
@@ -73,9 +87,9 @@ class InputLayer(nn.Module):
             adj = adj + adj_r
 
         dep_mask = get_mask_from_adj(adj)
-        seq_mask = get_attn_pad_mask(words, words)
-
-        return embs, dep_mask, seq_mask, adj
+        # pad_mask = get_attn_pad_mask(words, words)
+        pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
+        return embs, dep_mask, pad_mask, seq_mask, adj
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -141,7 +155,7 @@ class PoswiseFeedForwardNet(nn.Module):
 
     def forward(self, inputs):
         residual = self.drop(inputs) # inputs : [batch_size, len_q, d_model]
-        output = nn.ReLU()(self.conv1(inputs.transpose(1, 2)))
+        output = gelu(self.conv1(inputs.transpose(1, 2)))
         output = self.conv2(output).transpose(1, 2)
         return self.layerNorm(output + residual)
 
@@ -181,40 +195,64 @@ class Encoder(nn.Module):
         return enc_outputs, enc_self_attns
 
 
+def PoolingLayer(inputs, pool_mask, subj_mask, obj_mask, pool_type):
+    h_out = pool(inputs, pool_mask, type=pool_type)
+    subj_out = pool(inputs, subj_mask, type=pool_type)
+    obj_out = pool(inputs, obj_mask, type=pool_type)
+    outputs = torch.cat([h_out, subj_out, obj_out], dim=1)
+    return outputs, h_out
+
+
 class DGAModel(nn.Module):
     def __init__(self, opt, emb_matrix=None):
         super(DGAModel, self).__init__()
         self.opt = opt
         self.input_layer = InputLayer(opt, emb_matrix)
-        self.transformer = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
+
+        self.DEP_Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
+        self.SEQ_Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
+
+        self.label_embs = Embedding(len(constant.LABEL_TO_ID), opt["hidden_dim"])
 
         # output mlp layers
         in_dim = opt['hidden_dim'] * 3
-        layers = [nn.Linear(in_dim, opt['hidden_dim']), nn.ReLU()]
+        dep_layers = [nn.Linear(in_dim, opt['hidden_dim']), nn.ReLU()]
         for _ in range(self.opt['mlp_layers'] - 1):
-            layers += [nn.Linear(opt['hidden_dim'], opt['hidden_dim']), nn.ReLU()]
-        self.out_mlp = nn.Sequential(*layers)
-        self.classifier = nn.Linear(opt["hidden_dim"], opt['num_class'])
+            dep_layers += [nn.Linear(opt['hidden_dim'], opt['hidden_dim']), nn.ReLU()]
+        self.dep_out_mlp = nn.Sequential(*dep_layers)
+
+        seq_layers = [nn.Linear(in_dim, opt['hidden_dim']), nn.ReLU()]
+        for _ in range(self.opt['mlp_layers'] - 1):
+            seq_layers += [nn.Linear(opt['hidden_dim'], opt['hidden_dim']), nn.ReLU()]
+        self.seq_out_mlp = nn.Sequential(*seq_layers)
+
+        self.classifier = nn.Linear(opt["hidden_dim"] * 2, opt['num_class'])
 
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
-        embs, dep_mask, seq_mask, adj = self.input_layer(inputs)
+        embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
+        # print(pad_mask[0])
+        # print(seq_mask[0])
         # 现在实现的是 encoder和decoder都是同一个句子 encoder decoder 相同
-        enc_outputs, dec_enc_attns = self.transformer(embs, dep_mask)
-
+        dep_enc_outputs, dep_dec_enc_attns = self.DEP_Encoder(embs, dep_mask)
+        seq_enc_outputs, seq_dec_enc_attns = self.SEQ_Encoder(embs, seq_mask + pad_mask)
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
         pool_type = self.opt['pooling']
         pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
 
-        h_out = pool(enc_outputs, pool_mask, type=pool_type)
-        subj_out = pool(enc_outputs, subj_mask, type=pool_type)
-        obj_out = pool(enc_outputs, obj_mask, type=pool_type)
-        outputs = torch.cat([h_out, subj_out, obj_out], dim=1)
-        outputs = self.out_mlp(outputs)
+        DEP_outputs, DEP_hout = PoolingLayer(dep_enc_outputs, pool_mask, subj_mask, obj_mask, pool_type)
+        DEP_outputs = self.dep_out_mlp(DEP_outputs)
+
+        SEQ_outputs, SEQ_hout = PoolingLayer(seq_enc_outputs, pool_mask, subj_mask, obj_mask, pool_type)
+        SEQ_outputs = self.seq_out_mlp(SEQ_outputs)
+
+        outputs = torch.cat([SEQ_outputs, DEP_outputs], -1)
+
         logits = self.classifier(outputs)
-        return logits, h_out
+        # hout 用于pooling 的l2正则m'v
+        return logits, DEP_hout+SEQ_hout
 
 
 def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):
@@ -274,6 +312,25 @@ def get_attn_pad_mask(seq_q, seq_k):
     # eq(zero) is PAD token
     pad_attn_mask = seq_k.data.eq(0).unsqueeze(1)  # batch_size x 1 x len_k(=len_q), one is masking
     return pad_attn_mask.expand(batch_size, len_q, len_k).cuda()  # batch_size x len_q x len_k
+
+
+def get_attn_masks(lengths, slen):
+    """
+    Generate hidden states mask, and optionally an attention mask.
+    """
+    assert lengths.max().item() <= slen
+    bs = lengths.size(0)
+
+    alen = torch.arange(slen, dtype=torch.long)
+    if torch.cuda.is_available():
+        alen = alen.cuda()
+    mask = alen < lengths[:, None]
+    mask = mask.eq(0).unsqueeze(1).repeat(1, slen, 1)
+    attn_mask = alen[None, None, :].repeat(bs, slen, 1) <= alen[None, :, None]
+    attn_mask = attn_mask.eq(0)
+    # sanity check
+    assert attn_mask.size() == (bs, slen, slen)
+    return mask, attn_mask
 
 
 def pool(h, mask, type='max'):
