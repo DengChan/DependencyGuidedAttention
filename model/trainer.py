@@ -9,7 +9,7 @@ from torch.autograd import Variable
 import numpy as np
 
 from model.DGA import DGAModel
-from model.FocalLoss import FocalLoss
+from model.Loss import FocalLoss, MyLoss
 from utils import constant, torch_utils
 
 class Trainer(object):
@@ -67,7 +67,6 @@ class GCNTrainer(Trainer):
     def __init__(self, opt, emb_matrix=None):
         self.opt = opt
         self.emb_matrix = emb_matrix
-        #self.model = GCNClassifier(opt, emb_matrix=emb_matrix)
         self.model = DGAModel(opt, emb_matrix=emb_matrix)
         # self.criterion = nn.CrossEntropyLoss()
         self.alpha = []
@@ -90,8 +89,8 @@ class GCNTrainer(Trainer):
         # step forward
         self.model.train()
         self.optimizer.zero_grad()
-        logits, pooling_output = self.model(inputs)
-        loss = self.criterion(logits, labels)
+        scores, pooling_output = self.model(inputs)
+        loss = self.criterion(scores, labels)
         # l2 penalty on output representations
         if self.opt.get('pooling_l2', 0) > 0:
             loss += self.opt['pooling_l2'] * (pooling_output ** 2).sum(1).mean()

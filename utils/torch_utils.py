@@ -128,6 +128,7 @@ def keep_partial_grad(grad, topk):
     """
     assert topk < grad.size(0)
     grad.data[topk:].zero_()
+    grad.data[0].zero_()
     return grad
 
 ### model IO

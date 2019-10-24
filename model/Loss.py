@@ -1,9 +1,32 @@
 # -*- coding: utf-8 -*-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+import numpy as np
+
+
+class MyLoss(nn.Module):
+    def __init__(self, label_num, size_average=True):
+        super(MyLoss, self).__init__()
+        self.label_num = label_num
+
+    def forward(self, scores, labels):
+        labels_mask = torch.Tensor(np.eye(self.label_num)[labels]).byte() # [B X L] // One hot 形式
+        negtive_mask = torch.Tensor(labels).eq(0).byte() # [B]    // 负样例的mask为1
+        print(labels_mask)
+        print(negtive_mask)
+        positive_scores = scores.masked_select(labels_mask).masked_select(negtive_mask.eq(0)) # 每一行选出label位置的score, 在把非负样例的得分挑出来
+        positive_loss = (1-torch.nn.functional.sigmoid(positive_scores)).log().sum()
+
+        # 除标签外 最大的得分
+        wrong_scores = scores.masked_fill(labels_mask, 0) # [B x L]
+        wrong_scores, _ = wrong_scores.max(-1) # [B]
+        negtive_loss = torch.nn.functional.sigmoid(wrong_scores).log().sum()
+
+        loss = positive_loss + negtive_loss
+
+        return loss
 
 
 class FocalLoss(nn.Module):

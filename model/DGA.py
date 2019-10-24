@@ -24,6 +24,14 @@ def gelu(x):
     return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
+def PoolingLayer(inputs, pool_mask, subj_mask, obj_mask, pool_type):
+    h_out = pool(inputs, pool_mask, type=pool_type)
+    subj_out = pool(inputs, subj_mask, type=pool_type)
+    obj_out = pool(inputs, obj_mask, type=pool_type)
+    outputs = torch.cat([h_out, subj_out, obj_out], dim=1)
+    return outputs, h_out
+
+
 class InputLayer(nn.Module):
     def __init__(self, opt, emb_matrix=None):
         super().__init__()
@@ -46,6 +54,7 @@ class InputLayer(nn.Module):
             self.emb.weight.data[1:,:].uniform_(-1.0, 1.0)
         else:
             self.emb_matrix = torch.from_numpy(self.emb_matrix)
+            self.emb_matrix[0] = 0.0
             self.emb.weight.data.copy_(self.emb_matrix)
         # decide finetuning
         if self.opt['topn'] <= 0:
@@ -195,12 +204,22 @@ class Encoder(nn.Module):
         return enc_outputs, enc_self_attns
 
 
-def PoolingLayer(inputs, pool_mask, subj_mask, obj_mask, pool_type):
-    h_out = pool(inputs, pool_mask, type=pool_type)
-    subj_out = pool(inputs, subj_mask, type=pool_type)
-    obj_out = pool(inputs, obj_mask, type=pool_type)
-    outputs = torch.cat([h_out, subj_out, obj_out], dim=1)
-    return outputs, h_out
+class Scorer(nn.Module):
+    def __init__(self, opt):
+        super(Scorer, self).__init__()
+        self.label_num = len(constant.LABEL_TO_ID)
+        self.label_embs = Embedding(self.label_num, opt["label_dim"])
+
+    def forward(self, features):
+        """
+
+        :param features: B X E
+        :return:
+        """
+        # L X E
+        label_embedding = self.label_embs(torch.arange(self.label_num))
+        scores = torch.matmul(features, label_embedding.transpose(0, 1))
+        return scores
 
 
 class DGAModel(nn.Module):
@@ -215,44 +234,33 @@ class DGAModel(nn.Module):
         self.label_embs = Embedding(len(constant.LABEL_TO_ID), opt["hidden_dim"])
 
         # output mlp layers
-        in_dim = opt['hidden_dim'] * 3
-        dep_layers = [nn.Linear(in_dim, opt['hidden_dim']), nn.ReLU()]
-        for _ in range(self.opt['mlp_layers'] - 1):
-            dep_layers += [nn.Linear(opt['hidden_dim'], opt['hidden_dim']), nn.ReLU()]
-        self.dep_out_mlp = nn.Sequential(*dep_layers)
+        self.out_mlp = nn.Linear(opt["hidden_dim"], opt["label_dim"])
 
-        seq_layers = [nn.Linear(in_dim, opt['hidden_dim']), nn.ReLU()]
-        for _ in range(self.opt['mlp_layers'] - 1):
-            seq_layers += [nn.Linear(opt['hidden_dim'], opt['hidden_dim']), nn.ReLU()]
-        self.seq_out_mlp = nn.Sequential(*seq_layers)
-
-        self.classifier = nn.Linear(opt["hidden_dim"] * 2, opt['num_class'])
+        self.scorer = Scorer(opt)
 
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
         embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
-        # print(pad_mask[0])
-        # print(seq_mask[0])
-        # 现在实现的是 encoder和decoder都是同一个句子 encoder decoder 相同
-        dep_enc_outputs, dep_dec_enc_attns = self.DEP_Encoder(embs, dep_mask)
+
         seq_enc_outputs, seq_dec_enc_attns = self.SEQ_Encoder(embs, seq_mask + pad_mask)
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
         pool_type = self.opt['pooling']
-        pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
 
-        DEP_outputs, DEP_hout = PoolingLayer(dep_enc_outputs, pool_mask, subj_mask, obj_mask, pool_type)
-        DEP_outputs = self.dep_out_mlp(DEP_outputs)
+        subj_out = pool(seq_enc_outputs, subj_mask, type=pool_type)
+        obj_out = pool(seq_enc_outputs, obj_mask, type=pool_type)
 
-        SEQ_outputs, SEQ_hout = PoolingLayer(seq_enc_outputs, pool_mask, subj_mask, obj_mask, pool_type)
-        SEQ_outputs = self.seq_out_mlp(SEQ_outputs)
+        # s + r = o
+        outputs = obj_out - subj_out
+        outputs = self.out_mlp(outputs)
 
-        outputs = torch.cat([SEQ_outputs, DEP_outputs], -1)
+        scores = self.scorer(outputs)
+        # hout 用于pooling 的l2正则
+        return scores, outputs
 
-        logits = self.classifier(outputs)
-        # hout 用于pooling 的l2正则m'v
-        return logits, DEP_hout+SEQ_hout
+
+
 
 
 def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):

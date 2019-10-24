@@ -31,6 +31,7 @@ parser.add_argument('--vocab_dir', type=str, default='dataset/tacred/vocab')
 parser.add_argument('--emb_dim', type=int, default=300, help='Word embedding dimension.')
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
+parser.add_argument('--label_dim', type=int, default=128, help='label embedding dimension.')
 
 parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
 parser.add_argument('--V_dim', type=int, default=64, help='V dimension.')
