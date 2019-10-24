@@ -217,8 +217,9 @@ class Scorer(nn.Module):
         :return:
         """
         # L X E
-        label_embedding = self.label_embs(torch.arange(self.label_num))
+        label_embedding = self.label_embs(torch.arange(self.label_num).cuda())
         scores = torch.matmul(features, label_embedding.transpose(0, 1))
+        # scores = torch.sigmoid(scores)
         return scores
 
 

@@ -36,10 +36,11 @@ parser.add_argument('--label_dim', type=int, default=128, help='label embedding 
 parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
 parser.add_argument('--V_dim', type=int, default=64, help='V dimension.')
 parser.add_argument('--num_heads', type=int, default=4, help='num of heads')
-parser.add_argument('--feedforward_dim', type=int, default=1024, help='feedforward dim')
+parser.add_argument('--feedforward_dim', type=int, default=512, help='feedforward dim')
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden state size.')
 parser.add_argument('--num_layers', type=int, default=3, help='Num of Transformer layers.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
+parser.add_argument('--margin', type=float, default=1.0, help='margin of negetive')
 
 parser.add_argument('--word_dropout', type=float, default=0.02, help='The rate at which randomly set a word to UNK.')
 parser.add_argument('--topn', type=int, default=7000, help='Only finetune top N word embeddings.')
@@ -53,7 +54,7 @@ parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependenc
 parser.add_argument('--conv_l2', type=float, default=1e-5, help='L2-weight decay on conv layers only.')
 parser.add_argument('--pooling', choices=['max', 'avg', 'sum'], default='max', help='Pooling function type. Default max.')
 parser.add_argument('--pooling_l2', type=float, default=0, help='L2-penalty for all pooling output.')
-parser.add_argument('--mlp_layers', type=int, default=2, help='Number of output mlp layers.')
+parser.add_argument('--mlp_layers', type=int, default=1, help='Number of output mlp layers.')
 parser.add_argument('--no_adj', dest='no_adj', action='store_true', help="Zero out adjacency matrix for ablation.")
 
 parser.add_argument('--lr', type=float, default=0.0001, help='Applies to sgd and adagrad.')
@@ -61,8 +62,8 @@ parser.add_argument('--lr_decay', type=float, default=0.98, help='Learning rate 
 parser.add_argument('--decay_epoch', type=int, default=5, help='Decay learning rate after this epoch.')
 parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta'], default='adam',
                     help='Optimizer:sgd, adagrad, adam or adamax.')
-parser.add_argument('--num_epoch', type=int, default=500, help='Number of total training epochs.')
-parser.add_argument('--batch_size', type=int, default=64, help='Training batch size.')
+parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
+parser.add_argument('--batch_size', type=int, default=32, help='Training batch size.')
 parser.add_argument('--max_grad_norm', type=float, default=50.0, help='Gradient clipping.')
 parser.add_argument('--log_step', type=int, default=50, help='Print log every k steps.')
 parser.add_argument('--log', type=str, default='logs.txt', help='Write training log to file.')
