@@ -161,51 +161,6 @@ class EncoderLayer(nn.Module):
         return enc_outputs, attn
 
 
-class DecoderLayer(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
-        super(DecoderLayer, self).__init__()
-        self.opt = opt
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.dec_self_attn = MultiHeadAttention(opt, input_dim, output_dim)
-        self.dec_enc_attn = MultiHeadAttention(opt, output_dim, output_dim)
-        self.pos_ffn = PoswiseFeedForwardNet(output_dim, opt["feedforward_dim"], opt["input_dropout"])
-
-    def forward(self, dec_inputs, enc_outputs, dec_self_attn_mask, dec_enc_attn_mask):
-        dec_outputs, dec_self_attn = self.dec_self_attn(dec_inputs, dec_inputs, dec_inputs, dec_self_attn_mask)
-        dec_outputs, dec_enc_attn = self.dec_enc_attn(dec_outputs, enc_outputs, enc_outputs, dec_enc_attn_mask)
-        dec_outputs = self.pos_ffn(dec_outputs)
-        return dec_outputs, dec_self_attn, dec_enc_attn
-
-
-class Decoder(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
-        super(Decoder, self).__init__()
-        self.opt = opt
-        self.layers = nn.ModuleList()
-        for i in range(opt["num_layers"]):
-            if i == 0:
-                self.layers.append(DecoderLayer(opt, input_dim, output_dim))
-            else:
-                self.layers.append(DecoderLayer(opt, output_dim, output_dim))
-
-    def forward(self, dec_inputs, enc_inputs, dec_self_attn_mask, dec_enc_attn_mask): # dec_inputs : [batch_size x target_len]
-        # dec_outputs = self.tgt_emb(dec_inputs) + self.pos_emb(torch.LongTensor([[5,1,2,3,4]]))
-        # dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs)
-        # dec_self_attn_subsequent_mask = get_attn_subsequent_mask(dec_inputs)
-        # dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + dec_self_attn_subsequent_mask), 0)
-
-        # dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs)
-
-        dec_self_attns, dec_enc_attns = [], []
-        dec_outputs = dec_inputs
-        for layer in self.layers:
-            dec_outputs, dec_self_attn, dec_enc_attn = layer(dec_outputs, enc_inputs, dec_self_attn_mask, dec_enc_attn_mask)
-            dec_self_attns.append(dec_self_attn)
-            dec_enc_attns.append(dec_enc_attn)
-        return dec_outputs, dec_self_attns, dec_enc_attns
-
-
 class Encoder(nn.Module):
     def __init__(self, opt, input_dim, output_dim):
         super(Encoder, self).__init__()
@@ -226,28 +181,12 @@ class Encoder(nn.Module):
         return enc_outputs, enc_self_attns
 
 
-class Transformer(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
-        super(Transformer, self).__init__()
-        self.encoder = Encoder(opt, input_dim, output_dim)
-        self.decoder = Decoder(opt, input_dim, output_dim)
-        # self.projection = nn.Linear(output_dim, tgt_vocab_size, bias=False)
-
-    def forward(self, enc_inputs, dec_inputs, dep_mask, seq_mask):
-        # 现在实现的是 encoder和decoder都是同一个句子 所以用同一个mask
-        enc_outputs, enc_self_attns = self.encoder(enc_inputs, dep_mask)
-        dec_outputs, dec_self_attns, dec_enc_attns = self.decoder(dec_inputs, enc_outputs, dep_mask, seq_mask)
-        # dec_logits = self.projection(dec_outputs) # dec_logits : [batch_size x src_vocab_size x tgt_vocab_size]
-        # return dec_logits.view(-1, dec_logits.size(-1)), enc_self_attns, dec_self_attns, dec_enc_attns
-        return dec_outputs, dec_enc_attns
-
-
 class DGAModel(nn.Module):
     def __init__(self, opt, emb_matrix=None):
         super(DGAModel, self).__init__()
         self.opt = opt
         self.input_layer = InputLayer(opt, emb_matrix)
-        self.transformer = Transformer(opt, self.input_layer.input_dim, opt["hidden_dim"])
+        self.transformer = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
 
         # output mlp layers
         in_dim = opt['hidden_dim'] * 3
@@ -262,7 +201,7 @@ class DGAModel(nn.Module):
 
         embs, dep_mask, seq_mask, adj = self.input_layer(inputs)
         # 现在实现的是 encoder和decoder都是同一个句子 encoder decoder 相同
-        enc_outputs, dec_enc_attns = self.transformer(embs, embs, dep_mask, seq_mask)
+        enc_outputs, dec_enc_attns = self.transformer(embs, dep_mask)
 
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
