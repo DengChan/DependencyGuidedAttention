@@ -43,7 +43,9 @@ class InputLayer(nn.Module):
         self.pos_emb = Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID) if opt['pos_dim'] > 0 else None
         self.ner_emb = Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID) if opt['ner_dim'] is not None else None
 
-        self.input_dim = opt["emb_dim"] + opt["pos_dim"] + opt["ner_dim"]
+        self.gcn = GCN(opt["gcn_layers"], opt["pos_dim"], opt["dep_dim"])
+
+        self.input_dim = opt["emb_dim"] + opt["pos_dim"] + opt["ner_dim"]  + opt["dep_dim"]
 
         self.position_emb = nn.Embedding.from_pretrained(get_sinusoid_encoding_table(MAX_SEQ_LEN, self.input_dim), freeze=True)
         self.init_embeddings()
@@ -74,31 +76,39 @@ class InputLayer(nn.Module):
         maxlen = max(l)
         batch = len(words)
 
+        adj, adj_r = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data,
+                                         deprel, maxlen)
+        if self.opt["directed"]:
+            adj = adj + adj_r
+        adj = adj.eq(0).eq(0)
+
         # embedding 拼接
         word_embs = self.emb(words)
         embs = [word_embs]
-        if self.opt['pos_dim'] is not None:
-            pos_embs = self.pos_emb(pos)
-            embs += [pos_embs]
-        if self.opt['ner_dim'] is not None:
-            ner_embs = self.ner_emb(ner)
-            embs += [ner_embs]
+
+        pos_embs = self.pos_emb(pos)
+        embs += [pos_embs]
+
+
+        ner_embs = self.ner_emb(ner)
+        embs += [ner_embs]
+
+        depTree_embs = self.gcn(pos_embs, adj)
+        embs += [depTree_embs]
+
         embs = torch.cat(embs, dim=2)
 
         position = [i for i in range(1, maxlen+1)]
         position = torch.LongTensor(position).unsqueeze(0).repeat(batch, 1).cuda()
 
-        embs = embs + self.position_emb(position)
+        position_embs = self.position_emb(position)
+        embs = embs +position_embs
         embs = self.in_drop(embs.cuda())
-
-        adj, adj_r = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, deprel, maxlen)
-        if self.opt["directed"]:
-            adj = adj + adj_r
 
         dep_mask = get_mask_from_adj(adj)
         # pad_mask = get_attn_pad_mask(words, words)
         pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
-        return embs, dep_mask, pad_mask, seq_mask, adj
+        return embs, word_embs, pos_embs, ner_embs, dep_mask, pad_mask, seq_mask, adj
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -217,10 +227,34 @@ class Scorer(nn.Module):
         :return:
         """
         # L X E
-        label_embedding = self.label_embs(torch.arange(self.label_num).cuda())
+        label_embedding = self.label_embs(torch.arange(self.label_num).long().cuda())
         scores = torch.matmul(features, label_embedding.transpose(0, 1))
         # scores = torch.sigmoid(scores)
         return scores
+
+
+class GCN(nn.Module):
+    def __init__(self, layers, in_dim, out_dim):
+        super(GCN, self).__init__()
+        self.W = nn.ModuleList()
+        self.layer = layers
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        for layer in range(self.layers):
+            input_dim = self.in_dim if layer == 0 else self.out_dim
+            self.W.append(nn.Linear(input_dim, self.mem_dim))
+
+    def forward(self, input_features, adj):
+        denom = adj.sum(2).unsqueeze(2) + 1
+        for l in range(self.layers):
+            # batch mat mul
+            Ax = adj.bmm(input_features)
+            AxW = self.W[l](Ax)
+            AxW = AxW + self.W[l](input_features)  # self loop
+            AxW = AxW / denom
+
+            gAxW = gelu(AxW)
+        return gAxW
 
 
 class DGAModel(nn.Module):
@@ -229,39 +263,40 @@ class DGAModel(nn.Module):
         self.opt = opt
         self.input_layer = InputLayer(opt, emb_matrix)
 
-        self.DEP_Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
         self.SEQ_Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
 
         self.label_embs = Embedding(len(constant.LABEL_TO_ID), opt["hidden_dim"])
 
         # output mlp layers
-        self.out_mlp = nn.Linear(opt["hidden_dim"], opt["label_dim"])
+        self.out_mlp_1 = nn.Linear(opt["hidden_dim"]*3, opt["hidden_dim"])
+        self.out_mlp_2 = nn.Linear(opt["hidden_dim"], len(constant.LABEL_TO_ID))
 
         self.scorer = Scorer(opt)
 
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
-        embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
+        embs, word_embs, pos_embs, ner_embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
 
         seq_enc_outputs, seq_dec_enc_attns = self.SEQ_Encoder(embs, seq_mask + pad_mask)
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
+        pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
         pool_type = self.opt['pooling']
 
         subj_out = pool(seq_enc_outputs, subj_mask, type=pool_type)
+
         obj_out = pool(seq_enc_outputs, obj_mask, type=pool_type)
 
+        h_out = pool(seq_enc_outputs, pool_mask, type=pool_type)
         # s + r = o
-        outputs = obj_out - subj_out
-        outputs = self.out_mlp(outputs)
+        outputs = torch.cat([subj_out, obj_out, h_out], -1)
+        scores = gelu(self.out_mlp_1(outputs))
+        scores = gelu(self.out_mlp_2(scores))
 
-        scores = self.scorer(outputs)
+        # scores = self.scorer(outputs)
         # hout 用于pooling 的l2正则
         return scores, outputs
-
-
-
 
 
 def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):

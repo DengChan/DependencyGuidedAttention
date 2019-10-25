@@ -68,13 +68,14 @@ class GCNTrainer(Trainer):
         self.opt = opt
         self.emb_matrix = emb_matrix
         self.model = DGAModel(opt, emb_matrix=emb_matrix)
-        # self.criterion = nn.CrossEntropyLoss()
-        self.criterion = MyLoss(len(constant.LABEL_TO_ID))
+        self.criterion = nn.CrossEntropyLoss()
+        # self.criterion = MyLoss(len(constant.LABEL_TO_ID))
         self.parameters = [p for p in self.model.parameters() if p.requires_grad]
         if opt['cuda']:
             self.model.cuda()
             self.criterion.cuda()
         self.optimizer = torch_utils.get_optimizer(opt['optim'], self.parameters, opt["lr"], opt["conv_l2"])
+        #self.optimizer = torch.optim.RMSprop(self.parameters, lr=opt["lr"], weight_decay=opt["conv_l2"])
 
     def update(self, batch):
         inputs, labels, tokens, head, subj_pos, obj_pos, lens = unpack_batch(batch, self.opt['cuda'])
@@ -100,14 +101,24 @@ class GCNTrainer(Trainer):
         orig_idx = batch[11]
         # forward
         self.model.eval()
-        scores, _ = self.model(inputs)
-        loss = self.criterion(scores, labels)
-        max_score, max_idx = scores.max(-1)
-        negtive_mask = max_score < self.opt["margin"]
-        negtive_mask = negtive_mask.byte().cuda()
-        predictions = max_idx.masked_fill(negtive_mask, 0).cpu().numpy().tolist()
-        probs = max_score.cpu().detach().numpy().tolist()
 
+        # print("===============================================================================")
+        # scores, _ = self.model(inputs)
+        # loss = self.criterion(scores, labels)
+        # max_score, max_idx = scores.max(-1)
+        # negtive_mask = max_score < self.opt["margin"]
+        # negtive_mask = negtive_mask.byte().cuda()
+        # print(negtive_mask)
+        # predictions = max_idx.masked_fill(negtive_mask, 0).cpu().numpy().tolist()
+        # probs = max_score.cpu().detach().numpy().tolist()
+        # print(predictions)
+        # print(labels)
+        # print("===============================================================================")
+
+        logits, _ = self.model(inputs)
+        loss = self.criterion(logits, labels)
+        probs = F.softmax(logits, 1).data.cpu().numpy().tolist()
+        predictions = np.argmax(logits.data.cpu().numpy(), axis=1).tolist()
         if unsort:
             _, predictions, probs = [list(t) for t in zip(*sorted(zip(orig_idx,\
                     predictions, probs)))]

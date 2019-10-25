@@ -17,10 +17,11 @@ class MyLoss(nn.Module):
         #print(labels_mask)
         #print(negtive_mask)
         positive_scores = scores.masked_select(labels_mask).masked_select(negtive_mask.eq(0)) # 每一行选出label位置的score, 在把非负样例的得分挑出来
+        #positive_scores = scores.masked_select(labels_mask)
         positive_loss = (torch.exp(2*(2.5-positive_scores))+1).log().sum()
 
         # 除标签外 最大的得分
-        wrong_scores = scores.masked_fill(labels_mask, 0) # [B x L]
+        wrong_scores = scores.masked_fill(labels_mask, -9999999.0) # [B x L]
         wrong_scores, _ = wrong_scores.max(-1) # [B]
         negtive_loss = (torch.exp((wrong_scores+0.5)*2)+1).log().sum()
 
