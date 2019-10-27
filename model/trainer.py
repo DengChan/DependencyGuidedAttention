@@ -68,8 +68,7 @@ class GCNTrainer(Trainer):
         self.opt = opt
         self.emb_matrix = emb_matrix
         self.model = DGAModel(opt, emb_matrix=emb_matrix)
-        # self.criterion = nn.CrossEntropyLoss()
-        self.criterion = MyLoss(len(constant.LABEL_TO_ID))
+        self.criterion = nn.CrossEntropyLoss()
         self.parameters = [p for p in self.model.parameters() if p.requires_grad]
         if opt['cuda']:
             self.model.cuda()
@@ -100,13 +99,10 @@ class GCNTrainer(Trainer):
         orig_idx = batch[11]
         # forward
         self.model.eval()
-        scores, _ = self.model(inputs)
-        loss = self.criterion(scores, labels)
-        max_score, max_idx = scores.max(-1)
-        negtive_mask = max_score < self.opt["margin"]
-        negtive_mask = negtive_mask.byte().cuda()
-        predictions = max_idx.masked_fill(negtive_mask, 0).cpu().numpy().tolist()
-        probs = max_score.cpu().detach().numpy().tolist()
+        logits, _ = self.model(inputs)
+        loss = self.criterion(logits, labels)
+        probs = F.softmax(logits, 1).data.cpu().numpy().tolist()
+        predictions = np.argmax(logits.data.cpu().numpy(), axis=1).tolist()
 
         if unsort:
             _, predictions, probs = [list(t) for t in zip(*sorted(zip(orig_idx,\

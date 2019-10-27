@@ -48,7 +48,7 @@ parser.add_argument('--lower', dest='lower', action='store_true', help='Lowercas
 parser.add_argument('--no-lower', dest='lower', action='store_false')
 parser.set_defaults(lower=False)
 
-parser.add_argument('--directed', type=bool, default=False)
+parser.add_argument('--directed', type=bool, default=False, help="whether use double direction edge.")
 
 parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
 parser.add_argument('--conv_l2', type=float, default=1e-5, help='L2-weight decay on conv layers only.')

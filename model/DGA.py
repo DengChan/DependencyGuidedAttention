@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 import numpy as np
 import math
+import copy
 
 from utils import constant, torch_utils
 from model.tree import Tree, head_to_tree, tree_to_adj
@@ -51,7 +52,7 @@ class InputLayer(nn.Module):
 
     def init_embeddings(self):
         if self.emb_matrix is None:
-            self.emb.weight.data[1:,:].uniform_(-1.0, 1.0)
+            self.emb.weight.data[1:, :].uniform_(-1.0, 1.0)
         else:
             self.emb_matrix = torch.from_numpy(self.emb_matrix)
             self.emb_matrix[0] = 0.0
@@ -106,9 +107,16 @@ class ScaledDotProductAttention(nn.Module):
         super(ScaledDotProductAttention, self).__init__()
         self.d_k = opt["K_dim"]
 
-    def forward(self, Q, K, V, attn_mask):
+    def forward(self, Q, K, V, attn_mask, help_scores=None):
         scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k) # scores : [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]
         scores.masked_fill_(attn_mask, -1e9) # Fills elements of self tensor with value where mask is one.
+
+        if help_scores is not None:
+            help_scores_mask = help_scores > -1e8
+            help_scores_mask_dep = help_scores_mask.float() * 0.5
+            help_scores_mask_seq = help_scores_mask.float() * 0.5 + help_scores_mask.int().eq(0).float()
+            scores = help_scores * help_scores_mask_dep + scores*help_scores_mask_seq
+
         attn = nn.Softmax(dim=-1)(scores)
         context = torch.matmul(attn, V)
         return context, attn
@@ -130,7 +138,7 @@ class MultiHeadAttention(nn.Module):
         self.Wout = nn.Linear(self.n_heads * self.d_v, self.output_dim)
         self.layerNorm = nn.LayerNorm(self.output_dim)
 
-    def forward(self, Q, K, V, attn_mask):
+    def forward(self, Q, K, V, attn_mask, help_scores=None):
         # q: [batch_size x len_q x d_model], k: [batch_size x len_k x d_model], v: [batch_size x len_k x d_model]
         residual, batch_size = Q, Q.size(0)
         # (B, S, D) -proj-> (B, S, D) -split-> (B, S, H, W) -trans-> (B, H, S, W)
@@ -144,7 +152,7 @@ class MultiHeadAttention(nn.Module):
         attn_mask = attn_mask.unsqueeze(1).repeat(1, self.n_heads, 1, 1) # attn_mask : [batch_size x n_heads x len_q x len_k]
 
         # context: [batch_size x n_heads x len_q x d_v], attn: [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]
-        context, attn = self.DotProductAttention(q_s, k_s, v_s, attn_mask)
+        context, attn = self.DotProductAttention(q_s, k_s, v_s, attn_mask, help_scores)
         context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.n_heads * self.d_v) # context: [batch_size x len_q x n_heads * d_v]
         output = self.Wout(context)
         if residual.size(-1) != output.size(-1):
@@ -178,10 +186,25 @@ class EncoderLayer(nn.Module):
         self.enc_self_attn = MultiHeadAttention(opt, input_dim, output_dim)
         self.pos_ffn = PoswiseFeedForwardNet(output_dim, opt["feedforward_dim"], opt["input_dropout"])
 
-    def forward(self, enc_inputs, enc_self_attn_mask):
-        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs, enc_self_attn_mask) # enc_inputs to same Q,K,V
+    def forward(self, enc_inputs, enc_self_attn_mask, help_scores=None):
+        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs, enc_self_attn_mask, help_scores) # enc_inputs to same Q,K,V
         enc_outputs = self.pos_ffn(enc_outputs) # enc_outputs: [batch_size x len_q x d_model]
         return enc_outputs, attn
+
+
+class HyperLayer(nn.Module):
+    def __init__(self, opt, input_dim, output_dim):
+        super(HyperLayer, self).__init__()
+        self.opt = opt
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.SeqEncoderLayer = EncoderLayer(opt, input_dim, output_dim)
+        self.DepEncoderLayer = EncoderLayer(opt, input_dim, output_dim)
+
+    def forward(self, seq_inputs, dep_inputs,  seq_attn_mask, dep_attn_mask):
+        dep_outputs, dep_self_attn = self.DepEncoderLayer(dep_inputs, dep_attn_mask)
+        seq_outputs, seq_self_attn = self.SeqEncoderLayer(seq_inputs, seq_attn_mask, dep_self_attn)
+        return seq_outputs, seq_self_attn
 
 
 class Encoder(nn.Module):
@@ -191,15 +214,15 @@ class Encoder(nn.Module):
         self.layers = nn.ModuleList()
         for i in range(opt["num_layers"]):
             if i == 0:
-                self.layers.append(EncoderLayer(opt, input_dim, output_dim))
+                self.layers.append(HyperLayer(opt, input_dim, output_dim))
             else:
-                self.layers.append(EncoderLayer(opt, output_dim, output_dim))
+                self.layers.append(HyperLayer(opt, output_dim, output_dim))
 
-    def forward(self, input, attn_mask):
+    def forward(self, input, seq_attn_mask, dep_attn_mask):
         enc_self_attns = []
         enc_outputs = input
         for layer in self.layers:
-            enc_outputs, enc_self_attn = layer(enc_outputs, attn_mask)
+            enc_outputs, enc_self_attn = layer(enc_outputs, seq_attn_mask, dep_attn_mask)
             enc_self_attns.append(enc_self_attn)
         return enc_outputs, enc_self_attns
 
@@ -229,39 +252,33 @@ class DGAModel(nn.Module):
         self.opt = opt
         self.input_layer = InputLayer(opt, emb_matrix)
 
-        self.DEP_Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
-        self.SEQ_Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
-
-        self.label_embs = Embedding(len(constant.LABEL_TO_ID), opt["hidden_dim"])
+        self.Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
 
         # output mlp layers
-        self.out_mlp = nn.Linear(opt["hidden_dim"], opt["label_dim"])
-
+        input_dim = opt["hidden_dim"] * 3
+        self.out_mlp = nn.Linear(input_dim, opt["hidden_dim"])
+        self.classifier = nn.Linear(opt["hidden_dim"], len(constant.LABEL_TO_ID))
         self.scorer = Scorer(opt)
 
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
         embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
-
-        seq_enc_outputs, seq_dec_enc_attns = self.SEQ_Encoder(embs, seq_mask + pad_mask)
+        seq_enc_outputs, seq_dec_enc_attns = self.Encoder(embs, seq_mask, dep_mask)
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
+        pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
         pool_type = self.opt['pooling']
 
         subj_out = pool(seq_enc_outputs, subj_mask, type=pool_type)
         obj_out = pool(seq_enc_outputs, obj_mask, type=pool_type)
+        h_out = pool(seq_enc_outputs, pool_mask, type=pool_type)
 
-        # s + r = o
-        outputs = obj_out - subj_out
-        outputs = self.out_mlp(outputs)
-
-        scores = self.scorer(outputs)
+        outputs = torch.cat([subj_out, obj_out, h_out], -1)
+        outputs = gelu(self.out_mlp(outputs))
+        scores = self.classifier(outputs)
         # hout 用于pooling 的l2正则
         return scores, outputs
-
-
-
 
 
 def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):
@@ -276,7 +293,7 @@ def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, m
     adjs_r = []
     for tree in trees:
         adj = tree_to_adj(maxlen, tree, directed=True, edge_info=True)
-        adj_r = adj.T.copy()
+        adj_r = copy.deepcopy(adj.T)
         adj_r[adj_r>1] += constant.DEPREL_COUNT
         adjs.append(adj.reshape(1, maxlen, maxlen))
         adjs_r.append(adj_r.reshape(1, maxlen, maxlen))
