@@ -95,11 +95,16 @@ class InputLayer(nn.Module):
         adj, adj_r = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, deprel, maxlen)
         if self.opt["directed"]:
             adj = adj + adj_r
-
+        adjs_masks = []
+        adjs_masks.append(get_mask_from_adj(adj))
+        adj_i = copy.deepcopy(adj)
+        for i in range(2):
+            adj_i = torch.matmul(adj_i, adj.permute(0, 2, 1))
+            adjs_masks.append(get_mask_from_adj(adj_i))
         dep_mask = get_mask_from_adj(adj)
         # pad_mask = get_attn_pad_mask(words, words)
         pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
-        return embs, dep_mask, pad_mask, seq_mask, adj
+        return embs, dep_mask, pad_mask, seq_mask, adj, adjs_masks
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -208,21 +213,21 @@ class HyperLayer(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
+    def __init__(self, opt, input_dim, output_dim, layers):
         super(Encoder, self).__init__()
         self.opt = opt
         self.layers = nn.ModuleList()
-        for i in range(opt["num_layers"]):
+        for i in range(layers):
             if i == 0:
-                self.layers.append(HyperLayer(opt, input_dim, output_dim))
+                self.layers.append(EncoderLayer(opt, input_dim, output_dim))
             else:
-                self.layers.append(HyperLayer(opt, output_dim, output_dim))
+                self.layers.append(EncoderLayer(opt, output_dim, output_dim))
 
-    def forward(self, input, seq_attn_mask, dep_attn_mask):
+    def forward(self, input, attn_mask):
         enc_self_attns = []
         enc_outputs = input
         for layer in self.layers:
-            enc_outputs, enc_self_attn = layer(enc_outputs, seq_attn_mask, dep_attn_mask)
+            enc_outputs, enc_self_attn = layer(enc_outputs, attn_mask)
             enc_self_attns.append(enc_self_attn)
         return enc_outputs, enc_self_attns
 
@@ -246,33 +251,65 @@ class Scorer(nn.Module):
         return scores
 
 
+class LSTMLayer(nn.Module):
+    def __init__(self, opt, in_dim, hidden_dim):
+        super(LSTMLayer, self).__init__()
+        self.opt = opt
+        self.hidden_dim = hidden_dim
+        input_size = in_dim
+        self.rnn = nn.LSTM(input_size, hidden_dim, opt['rnn_layers'], batch_first=True,
+                           dropout=opt['rnn_dropout'], bidirectional=True)
+        self.in_dim = hidden_dim * 2
+        self.rnn_drop = nn.Dropout(opt['rnn_dropout'])  # use on last layer output
+        # self.rnn_layer_norm = nn.LayerNorm(self.in_dim)
+
+    def forward(self, rnn_inputs, masks, batch_size):
+        seq_lens = list(masks.data.eq(constant.PAD_ID).long().sum(1).squeeze())
+        h0, c0 = rnn_zero_state(batch_size, self.hidden_dim, self.opt['rnn_layers'])
+        rnn_inputs = nn.utils.rnn.pack_padded_sequence(rnn_inputs, seq_lens, batch_first=True)
+        rnn_outputs, (ht, ct) = self.rnn(rnn_inputs, (h0, c0))
+        rnn_outputs, _ = nn.utils.rnn.pad_packed_sequence(rnn_outputs, batch_first=True)
+        rnn_outputs = self.rnn_drop(rnn_outputs)
+        return rnn_outputs
+
+
 class DGAModel(nn.Module):
     def __init__(self, opt, emb_matrix=None):
         super(DGAModel, self).__init__()
         self.opt = opt
         self.input_layer = InputLayer(opt, emb_matrix)
-
-        self.Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
+        self.in_dim = self.input_layer.input_dim
+        # LSTM Layer
+        if opt["rnn"]:
+            self.LSTM = LSTMLayer(opt, self.input_layer.input_dim, opt["rnn_hidden"])
+            self.in_dim = opt["rnn_hidden"] * 2
+        self.Encoder = Encoder(opt, self.in_dim, opt["hidden_dim"], opt["num_layers"])
+        self.DEP_Encoder = Encoder(opt, opt["hidden_dim"], opt["hidden_dim"], opt["dep_layers"])
 
         # output mlp layers
         input_dim = opt["hidden_dim"] * 3
         self.out_mlp = nn.Linear(input_dim, opt["hidden_dim"])
         self.classifier = nn.Linear(opt["hidden_dim"], len(constant.LABEL_TO_ID))
-        self.scorer = Scorer(opt)
+        # self.scorer = Scorer(opt)
 
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
-        embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
-        seq_enc_outputs, seq_dec_enc_attns = self.Encoder(embs, seq_mask, dep_mask)
+        embs, dep_mask, pad_mask, seq_mask, adj, adjs_masks = self.input_layer(inputs)
+        encoder_inputs = embs
+        if self.opt["rnn"]:
+            encoder_inputs = self.LSTM(embs, masks, words.size()[0])
+        seq_enc_outputs, seq_dec_enc_attns = self.Encoder(encoder_inputs, seq_mask)
+        dep_enc_outputs, dep_dec_enc_attns = self.DEP_Encoder(seq_enc_outputs, dep_mask)
+
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
         pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
         pool_type = self.opt['pooling']
 
-        subj_out = pool(seq_enc_outputs, subj_mask, type=pool_type)
-        obj_out = pool(seq_enc_outputs, obj_mask, type=pool_type)
-        h_out = pool(seq_enc_outputs, pool_mask, type=pool_type)
+        subj_out = pool(dep_enc_outputs, subj_mask, type=pool_type)
+        obj_out = pool(dep_enc_outputs, obj_mask, type=pool_type)
+        h_out = pool(dep_enc_outputs, pool_mask, type=pool_type)
 
         outputs = torch.cat([subj_out, obj_out, h_out], -1)
         outputs = gelu(self.out_mlp(outputs))
@@ -369,3 +406,13 @@ def pool(h, mask, type='max'):
     else:
         h = h.masked_fill(mask, 0)
         return h.sum(1)
+
+
+def rnn_zero_state(batch_size, hidden_dim, num_layers, bidirectional=True, use_cuda=True):
+    total_layers = num_layers * 2 if bidirectional else num_layers
+    state_shape = (total_layers, batch_size, hidden_dim)
+    h0 = c0 = Variable(torch.zeros(*state_shape), requires_grad=False)
+    if use_cuda:
+        return h0.cuda(), c0.cuda()
+    else:
+        return h0, c0
