@@ -26,12 +26,13 @@ import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_dir', type=str, default='dataset/tacred')
+parser.add_argument('--data_dir', type=str, default='dataset')
 parser.add_argument('--vocab_dir', type=str, default='dataset/tacred/vocab')
 # Input
 parser.add_argument('--emb_dim', type=int, default=300, help='Word embedding dimension.')
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
+parser.add_argument('--dist_dim', type=int, default=50, help='POS embedding dimension.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
 
 # RNN
@@ -65,13 +66,13 @@ parser.add_argument('--pooling_l2', type=float, default=0, help='L2-penalty for 
 parser.add_argument('--no_adj', dest='no_adj', action='store_true', help="Zero out adjacency matrix for ablation.")
 
 parser.add_argument('--lr', type=float, default=0.01, help='Applies to sgd and adagrad.')
-parser.add_argument('--lr_decay', type=float, default=0.98, help='Learning rate decay rate.')
+parser.add_argument('--lr_decay', type=float, default=0.9, help='Learning rate decay rate.')
 parser.add_argument('--decay_epoch', type=int, default=5, help='Decay learning rate after this epoch.')
-parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta'], default='adagrad',
+parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta'], default='sgd',
                     help='Optimizer:sgd, adagrad, adam or adamax.')
 parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
 parser.add_argument('--batch_size', type=int, default=64, help='Training batch size.')
-parser.add_argument('--max_grad_norm', type=float, default=5.0, help='Gradient clipping.')
+parser.add_argument('--max_grad_norm', type=float, default=10.0, help='Gradient clipping.')
 parser.add_argument('--log_step', type=int, default=50, help='Print log every k steps.')
 parser.add_argument('--log', type=str, default='logs.txt', help='Write training log to file.')
 parser.add_argument('--save_epoch', type=int, default=30, help='Save model checkpoints every k epochs.')

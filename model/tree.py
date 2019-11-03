@@ -56,7 +56,7 @@ class Tree(object):
             for x in c:
                 yield x
 
-def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, deprel=None):
+def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, maxlen):
     """
     Convert a sequence of head indexes into a tree object.
     """
@@ -64,108 +64,99 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, deprel=None):
     head = head[:len_].tolist()
     root = None
 
-    if prune < 0:
-        nodes = [Tree() for _ in head]
 
-        for i in range(len(nodes)):
-            h = head[i]
-            if deprel is not None:
-                dep_type = deprel[i]
-            nodes[i].idx = i
-            nodes[i].dist = -1 # just a filler
-            if h == 0:
-                root = nodes[i]
-            else:
-                if deprel is None:
-                    nodes[h-1].add_child(nodes[i])
-                else:
-                    nodes[h-1].add_child(nodes[i], dep_type)
-    else:
-        # find dependency path
-        subj_pos = [i for i in range(len_) if subj_pos[i] == 0]
-        obj_pos = [i for i in range(len_) if obj_pos[i] == 0]
+    nodes = [Tree() for _ in head]
 
-        cas = None
+    for i in range(len(nodes)):
+        h = head[i]
+        nodes[i].idx = i
+        nodes[i].dist = -1 # just a filler
+        if h == 0:
+            root = nodes[i]
+        else:
+            nodes[h-1].add_child(nodes[i])
 
-        subj_ancestors = set(subj_pos)
-        for s in subj_pos:
-            h = head[s]
-            tmp = [s]
-            while h > 0:
-                tmp += [h-1]
-                subj_ancestors.add(h-1)
-                h = head[h-1]
+    # find dependency path
+    subj_pos = [i for i in range(len_) if subj_pos[i] == 0]
+    obj_pos = [i for i in range(len_) if obj_pos[i] == 0]
 
-            if cas is None:
-                cas = set(tmp)
-            else:
-                cas.intersection_update(tmp)
+    cas = None
 
-        obj_ancestors = set(obj_pos)
-        for o in obj_pos:
-            h = head[o]
-            tmp = [o]
-            while h > 0:
-                tmp += [h-1]
-                obj_ancestors.add(h-1)
-                h = head[h-1]
+    subj_ancestors = set(subj_pos)
+    for s in subj_pos:
+        h = head[s]
+        tmp = [s]
+        while h > 0:
+            tmp += [h - 1]
+            subj_ancestors.add(h - 1)
+            h = head[h - 1]
+
+        if cas is None:
+            cas = set(tmp)
+        else:
             cas.intersection_update(tmp)
 
-        # find lowest common ancestor
-        if len(cas) == 1:
-            lca = list(cas)[0]
+    obj_ancestors = set(obj_pos)
+    for o in obj_pos:
+        h = head[o]
+        tmp = [o]
+        while h > 0:
+            tmp += [h - 1]
+            obj_ancestors.add(h - 1)
+            h = head[h - 1]
+        cas.intersection_update(tmp)
+
+    # find lowest common ancestor
+    if len(cas) == 1:
+        lca = list(cas)[0]
+    else:
+        child_count = {k: 0 for k in cas}
+        for ca in cas:
+            if head[ca] > 0 and head[ca] - 1 in cas:
+                child_count[head[ca] - 1] += 1
+
+        # the LCA has no child in the CA set
+        for ca in cas:
+            if child_count[ca] == 0:
+                lca = ca
+                break
+
+    path_nodes = subj_ancestors.union(obj_ancestors).difference(cas)
+    path_nodes.add(lca)
+
+    # compute distance to path_nodes
+    dist = [-1 if i not in path_nodes else 0 for i in range(len_)]
+
+    for i in range(len_):
+        if dist[i] < 0:
+            stack = [i]
+            while stack[-1] >= 0 and stack[-1] not in path_nodes:
+                stack.append(head[stack[-1]] - 1)
+
+            if stack[-1] in path_nodes:
+                for d, j in enumerate(reversed(stack)):
+                    dist[j] = d
+            else:
+                for j in stack:
+                    if j >= 0 and dist[j] < 0:
+                        dist[j] = int(1e4)  # aka infinity
+
+    # 不可及点为编码0， 其余的 + 1
+    for i in range(len(dist)):
+        d = dist[i]
+        assert d != -1
+        if d != 1e4:
+            dist[i] = d+1
         else:
-            child_count = {k:0 for k in cas}
-            for ca in cas:
-                if head[ca] > 0 and head[ca] - 1 in cas:
-                    child_count[head[ca] - 1] += 1
-
-            # the LCA has no child in the CA set
-            for ca in cas:
-                if child_count[ca] == 0:
-                    lca = ca
-                    break
-
-        path_nodes = subj_ancestors.union(obj_ancestors).difference(cas)
-        path_nodes.add(lca)
-
-        # compute distance to path_nodes
-        dist = [-1 if i not in path_nodes else 0 for i in range(len_)]
-
-        for i in range(len_):
-            if dist[i] < 0:
-                stack = [i]
-                while stack[-1] >= 0 and stack[-1] not in path_nodes:
-                    stack.append(head[stack[-1]] - 1)
-
-                if stack[-1] in path_nodes:
-                    for d, j in enumerate(reversed(stack)):
-                        dist[j] = d
-                else:
-                    for j in stack:
-                        if j >= 0 and dist[j] < 0:
-                            dist[j] = int(1e4) # aka infinity
-
-        highest_node = lca
-        nodes = [Tree() if dist[i] <= prune else None for i in range(len_)]
-
-        for i in range(len(nodes)):
-            if nodes[i] is None:
-                continue
-            h = head[i]
-            nodes[i].idx = i
-            nodes[i].dist = dist[i]
-            if h > 0 and i != highest_node:
-                assert nodes[h-1] is not None
-                nodes[h-1].add_child(nodes[i])
-
-        root = nodes[highest_node]
-
+            dist[i] = 0
+    while len(dist) < maxlen:
+        dist.append(0)
+    assert len(dist) == maxlen
     assert root is not None
-    return root
+    return root, dist
 
 
-def tree_to_adj(sent_len, tree, directed=True, edge_info=False):
+def tree_to_adj(sent_len, tree):
     """
     Convert a tree object to an (numpy) adjacency matrix.
     """
@@ -179,23 +170,12 @@ def tree_to_adj(sent_len, tree, directed=True, edge_info=False):
         idx += [t.idx]
         children=[]
         for c in t.children:
-            if not edge_info:
-                ret[t.idx, c.idx] = 1
-                children.append(c)
-            else:
-                # 如果使用了边的信息,children是(node,dep_type)的列表
-                # 这条边使用两者的依存关系类型 [ 头<--dep_type--尾 ] 
-                # 如果单向 只保留子节点到自己的边，忽略自己到父节点的边
-                # 如果双向 全都保留
-                ret[t.idx, c[0].idx] = c[1]
-                children.append(c[0])
+            ret[t.idx, c.idx] = 1
+            children.append(c)
             
         queue += children
 
-    if not directed:
-        return ret + ret.T
-    else:
-        return ret
+    return ret
 
 
 def tree_to_dist(sent_len, tree):

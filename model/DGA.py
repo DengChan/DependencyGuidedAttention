@@ -33,80 +33,6 @@ def PoolingLayer(inputs, pool_mask, subj_mask, obj_mask, pool_type):
     return outputs, h_out
 
 
-class InputLayer(nn.Module):
-    def __init__(self, opt, emb_matrix=None):
-        super().__init__()
-        self.opt = opt
-        self.emb_matrix = emb_matrix
-
-        # create embedding layers
-        self.emb = Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
-        self.pos_emb = Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID) if opt['pos_dim'] > 0 else None
-        self.ner_emb = Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID) if opt['ner_dim'] is not None else None
-
-        self.input_dim = opt["emb_dim"] + opt["pos_dim"] + opt["ner_dim"]
-
-        self.position_emb = nn.Embedding.from_pretrained(get_sinusoid_encoding_table(MAX_SEQ_LEN, self.input_dim), freeze=True)
-        self.init_embeddings()
-        self.in_drop = nn.Dropout(opt['input_dropout'])
-
-    def init_embeddings(self):
-        if self.emb_matrix is None:
-            self.emb.weight.data[1:, :].uniform_(-1.0, 1.0)
-        else:
-            self.emb_matrix = torch.from_numpy(self.emb_matrix)
-            self.emb_matrix[0] = 0.0
-            self.emb.weight.data.copy_(self.emb_matrix)
-        # decide finetuning
-        if self.opt['topn'] <= 0:
-            print("Do not finetune word embedding layer.")
-            self.emb.weight.requires_grad = False
-        elif self.opt['topn'] < self.opt['vocab_size']:
-            print("Finetune top {} word embeddings.".format(self.opt['topn']))
-            self.emb.weight.register_hook(lambda x: \
-                    torch_utils.keep_partial_grad(x, self.opt['topn']))
-        else:
-            print("Finetune all embeddings.")
-
-    def forward(self, inputs):
-        words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
-        # padding 是1 词是0
-        l = (masks.data.cpu().numpy() == 0).astype(np.int64).sum(1)
-        maxlen = max(l)
-        batch = len(words)
-
-        # embedding 拼接
-        word_embs = self.emb(words)
-        embs = [word_embs]
-        if self.opt['pos_dim'] is not None:
-            pos_embs = self.pos_emb(pos)
-            embs += [pos_embs]
-        if self.opt['ner_dim'] is not None:
-            ner_embs = self.ner_emb(ner)
-            embs += [ner_embs]
-        embs = torch.cat(embs, dim=2)
-
-        position = [i for i in range(1, maxlen+1)]
-        position = torch.LongTensor(position).unsqueeze(0).repeat(batch, 1).cuda()
-
-        embs = embs + self.position_emb(position)
-        embs = self.in_drop(embs.cuda())
-
-        adj, adj_r = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, deprel, maxlen)
-        if self.opt["directed"]:
-            adj = adj + adj_r
-        adjs_masks = []
-        adjs_masks.append(get_mask_from_adj(adj))
-        adj_i = copy.deepcopy(adj)
-        for i in range(2):
-            adj_i = torch.matmul(adj_i, adj.permute(0, 2, 1))
-            adjs_masks.append(get_mask_from_adj(adj_i))
-        dep_mask = get_mask_from_adj(adj)
-        # pad_mask = get_attn_pad_mask(words, words)
-        pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
-        return embs, dep_mask, pad_mask, seq_mask, adj, adjs_masks
-
-
 class ScaledDotProductAttention(nn.Module):
     def __init__(self, opt):
         super(ScaledDotProductAttention, self).__init__()
@@ -232,25 +158,6 @@ class Encoder(nn.Module):
         return enc_outputs, enc_self_attns
 
 
-class Scorer(nn.Module):
-    def __init__(self, opt):
-        super(Scorer, self).__init__()
-        self.label_num = len(constant.LABEL_TO_ID)
-        self.label_embs = Embedding(self.label_num, opt["label_dim"])
-
-    def forward(self, features):
-        """
-
-        :param features: B X E
-        :return:
-        """
-        # L X E
-        label_embedding = self.label_embs(torch.arange(self.label_num).cuda())
-        scores = torch.matmul(features, label_embedding.transpose(0, 1))
-        # scores = torch.sigmoid(scores)
-        return scores
-
-
 class LSTMLayer(nn.Module):
     def __init__(self, opt, in_dim, hidden_dim):
         super(LSTMLayer, self).__init__()
@@ -273,6 +180,91 @@ class LSTMLayer(nn.Module):
         return rnn_outputs
 
 
+class InputLayer(nn.Module):
+    def __init__(self, opt, emb_matrix=None):
+        super().__init__()
+        self.opt = opt
+        self.emb_matrix = emb_matrix
+
+        # create embedding layers
+        self.emb = Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
+        self.pos_emb = Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID) if opt['pos_dim'] > 0 else None
+        self.ner_emb = Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID) if opt['ner_dim'] is not None else None
+        if opt["dist_dim"] >0:
+            self.dist_emb = nn.Embedding(100, opt["dist_dim"], padding_idx=constant.PAD_ID)
+        self.input_dim = opt["emb_dim"] + opt["pos_dim"] + opt["ner_dim"]
+        if self.opt["rnn"]:
+            self.position_emb = nn.Embedding.from_pretrained(get_sinusoid_encoding_table(MAX_SEQ_LEN, 2 * self.opt["rnn_hidden"]),
+                                                             freeze=True)
+        else:
+            self.position_emb = nn.Embedding.from_pretrained(get_sinusoid_encoding_table(MAX_SEQ_LEN, self.input_dim),
+                                                             freeze=False)
+        self.init_embeddings()
+        self.in_drop = nn.Dropout(opt['input_dropout'])
+
+    def init_embeddings(self):
+        if self.emb_matrix is None:
+            self.emb.weight.data[1:, :].uniform_(-1.0, 1.0)
+        else:
+            self.emb_matrix = torch.from_numpy(self.emb_matrix)
+            self.emb_matrix[0] = 0.0
+            self.emb.weight.data.copy_(self.emb_matrix)
+        # decide finetuning
+        if self.opt['topn'] <= 0:
+            print("Do not finetune word embedding layer.")
+            self.emb.weight.requires_grad = False
+        elif self.opt['topn'] < self.opt['vocab_size']:
+            print("Finetune top {} word embeddings.".format(self.opt['topn']))
+            self.emb.weight.register_hook(lambda x: \
+                    torch_utils.keep_partial_grad(x, self.opt['topn']))
+        else:
+            print("Finetune all embeddings.")
+
+    def forward(self, inputs):
+        words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
+        # padding 是1 词是0
+        l = (masks.data.cpu().numpy() == 0).astype(np.int64).sum(1)
+        maxlen = max(l)
+        batch = len(words)
+
+        # embedding 拼接
+        word_embs = self.emb(words)
+        embs = [word_embs]
+        if self.opt['pos_dim'] is not None:
+            pos_embs = self.pos_emb(pos)
+            embs += [pos_embs]
+        if self.opt['ner_dim'] is not None:
+            ner_embs = self.ner_emb(ner)
+            embs += [ner_embs]
+        embs = torch.cat(embs, dim=2)
+        embs = self.in_drop(embs.cuda())
+
+        position = [i for i in range(1, maxlen + 1)]
+        position = torch.LongTensor(position).unsqueeze(0).repeat(batch, 1).cuda()
+        position_emb = self.position_emb(position)
+
+        adj, adj_r, dists = inputs_to_tree_dist(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, None, maxlen)
+        # 与LCA距离的embedding
+        dist_emb = None
+        if self.opt["dist_dim"] > 0:
+            dist_emb = self.dist_emb(dists)
+
+        if self.opt["directed"]:
+            adj = adj + adj_r
+
+        # adjs_masks ： A^n  不同hop的adj mask
+        adjs_masks = []
+        adjs_masks.append(get_mask_from_adj(adj))
+        adj_i = copy.deepcopy(adj)
+        for i in range(2):
+            adj_i = torch.matmul(adj_i, adj.permute(0, 2, 1))
+            adjs_masks.append(get_mask_from_adj(adj_i))
+        dep_mask = get_mask_from_adj(adj)
+        # pad_mask = get_attn_pad_mask(words, words)
+        pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
+        return embs, position_emb, dist_emb, dep_mask, pad_mask, seq_mask, adj, adjs_masks
+
+
 class DGAModel(nn.Module):
     def __init__(self, opt, emb_matrix=None):
         super(DGAModel, self).__init__()
@@ -283,6 +275,11 @@ class DGAModel(nn.Module):
         if opt["rnn"]:
             self.LSTM = LSTMLayer(opt, self.input_layer.input_dim, opt["rnn_hidden"])
             self.in_dim = opt["rnn_hidden"] * 2
+
+        # LCA 距离 Embedding dim
+        if self.opt["dist_dim"] > 0 :
+            self.in_dim += self.opt["dist_dim"]
+
         self.Encoder = Encoder(opt, self.in_dim, opt["hidden_dim"], opt["num_layers"])
         self.DEP_Encoder = Encoder(opt, opt["hidden_dim"], opt["hidden_dim"], opt["dep_layers"])
 
@@ -295,10 +292,16 @@ class DGAModel(nn.Module):
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
-        embs, dep_mask, pad_mask, seq_mask, adj, adjs_masks = self.input_layer(inputs)
+        embs, position_emb, dist_emb, dep_mask, pad_mask, seq_mask, adj, adjs_masks = self.input_layer(inputs)
+
         encoder_inputs = embs
+
         if self.opt["rnn"]:
             encoder_inputs = self.LSTM(embs, masks, words.size()[0])
+
+        encoder_inputs = encoder_inputs + position_emb
+        if self.opt["dist_dim"] > 0:
+            encoder_inputs = torch.cat([encoder_inputs, dist_emb], -1)
         seq_enc_outputs, seq_dec_enc_attns = self.Encoder(encoder_inputs, seq_mask)
         dep_enc_outputs, dep_dec_enc_attns = self.DEP_Encoder(seq_enc_outputs, dep_mask)
 
@@ -318,20 +321,22 @@ class DGAModel(nn.Module):
         return scores, outputs
 
 
-def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):
+def inputs_to_tree_dist(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):
     head, words, subj_pos, obj_pos = head.cpu().numpy(), words.cpu().numpy(), subj_pos.cpu().numpy(), obj_pos.cpu().numpy()
-    if deprel is not None:
-        deprel = deprel.cpu().numpy()
-        trees = [head_to_tree(head[i], words[i], l[i], prune, subj_pos[i], obj_pos[i], deprel[i]) for i in range(len(l))]
-    else:
-        trees = [head_to_tree(head[i], words[i], l[i], prune, subj_pos[i], obj_pos[i]) for i in range(len(l))]
+
+    trees = []
+    dists = []
+
+    for i in range(len(l)):
+        t, d = head_to_tree(head[i], words[i], l[i], prune, subj_pos[i], obj_pos[i], maxlen)
+        trees.append(t)
+        dists.append(d)
     # adj 邻接边为边类型
     adjs = []
     adjs_r = []
     for tree in trees:
-        adj = tree_to_adj(maxlen, tree, directed=True, edge_info=True)
+        adj = tree_to_adj(maxlen, tree)
         adj_r = copy.deepcopy(adj.T)
-        adj_r[adj_r>1] += constant.DEPREL_COUNT
         adjs.append(adj.reshape(1, maxlen, maxlen))
         adjs_r.append(adj_r.reshape(1, maxlen, maxlen))
     adjs = np.concatenate(adjs, axis=0)
@@ -341,7 +346,11 @@ def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, m
     adjs = Variable(adjs.cuda())
     adjs_r = Variable(adjs_r.cuda())
 
-    return adjs, adjs_r
+    dists = np.array(dists, dtype=np.long)
+    dists = torch.from_numpy(dists)
+    dists = Variable(dists.cuda())
+
+    return adjs, adjs_r, dists
 
 
 def get_sinusoid_encoding_table(n_position, d_model):
