@@ -21,7 +21,7 @@ from utils import torch_utils, scorer, constant, helper
 from utils.vocab import Vocab
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', type=str, default='dataset/origin')
@@ -65,7 +65,7 @@ parser.add_argument('--no_adj', dest='no_adj', action='store_true', help="Zero o
 parser.add_argument('--lr', type=float, default=0.01, help='Applies to sgd and adagrad.')
 parser.add_argument('--lr_decay', type=float, default=0.98, help='Learning rate decay rate.')
 parser.add_argument('--decay_epoch', type=int, default=5, help='Decay learning rate after this epoch.')
-parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta'], default='adagrad',
+parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta', "BertAdam"], default='adagrad',
                     help='Optimizer:sgd, adagrad, adam or adamax.')
 parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
 parser.add_argument('--batch_size', type=int, default=64, help='Training batch size.')

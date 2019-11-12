@@ -5,7 +5,7 @@ Utility functions for torch.
 import torch
 from torch import nn, optim
 from torch.optim import Optimizer
-
+from utils.optimization import AdamW
 ### class
 class MyAdagrad(Optimizer):
     """My modification of the Adagrad optimizer that allows to specify an initial
@@ -100,6 +100,8 @@ def get_optimizer(name, parameters, lr, l2=0):
         return torch.optim.Adam(parameters, lr=lr, weight_decay=l2) # use default lr
     elif name == 'adamax':
         return torch.optim.Adamax(parameters, lr=lr, weight_decay=l2) # use default lr
+    elif name == 'BertAdam':
+        return AdamW(parameters, lr=lr, eps=1e-8)
     elif name == 'adadelta':
         return torch.optim.Adadelta(parameters, lr=lr, weight_decay=l2)
     else:
