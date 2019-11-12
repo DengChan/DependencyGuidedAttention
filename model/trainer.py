@@ -8,8 +8,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
 
-from model.DGA import DGAModel
-from model.Loss import FocalLoss, MyLoss
+from model.gcn import DGAModel
 from utils import constant, torch_utils
 
 class Trainer(object):
@@ -23,9 +22,7 @@ class Trainer(object):
         raise NotImplementedError
 
     def update_lr(self, new_lr):
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = param_group['lr'] * self.opt['lr_decay']
-        # torch_utils.change_lr(self.optimizer, new_lr)
+        torch_utils.change_lr(self.optimizer, new_lr)
 
     def load(self, filename):
         try:
@@ -62,7 +59,6 @@ def unpack_batch(batch, cuda):
     lens = batch[1].eq(0).long().sum(1).squeeze()
     return inputs, labels, tokens, head, subj_pos, obj_pos, lens
 
-
 class GCNTrainer(Trainer):
     def __init__(self, opt, emb_matrix=None):
         self.opt = opt
@@ -73,7 +69,7 @@ class GCNTrainer(Trainer):
         if opt['cuda']:
             self.model.cuda()
             self.criterion.cuda()
-        self.optimizer = torch_utils.get_optimizer(opt['optim'], self.parameters, opt["lr"], opt["conv_l2"])
+        self.optimizer = torch_utils.get_optimizer(opt['optim'], self.parameters, opt['lr'])
 
     def update(self, batch):
         inputs, labels, tokens, head, subj_pos, obj_pos, lens = unpack_batch(batch, self.opt['cuda'])
@@ -81,8 +77,11 @@ class GCNTrainer(Trainer):
         # step forward
         self.model.train()
         self.optimizer.zero_grad()
-        scores, pooling_output = self.model(inputs)
-        loss = self.criterion(scores, labels)
+        logits, pooling_output = self.model(inputs)
+        loss = self.criterion(logits, labels)
+        # l2 decay on all conv layers
+        # if self.opt.get('conv_l2', 0) > 0:
+        #     loss += self.model.conv_l2() * self.opt['conv_l2']
         # l2 penalty on output representations
         if self.opt.get('pooling_l2', 0) > 0:
             loss += self.opt['pooling_l2'] * (pooling_output ** 2).sum(1).mean()
@@ -91,7 +90,6 @@ class GCNTrainer(Trainer):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt['max_grad_norm'])
         self.optimizer.step()
-        # print(self.optimizer.param_groups)
         return loss_val
 
     def predict(self, batch, unsort=True):
@@ -103,7 +101,6 @@ class GCNTrainer(Trainer):
         loss = self.criterion(logits, labels)
         probs = F.softmax(logits, 1).data.cpu().numpy().tolist()
         predictions = np.argmax(logits.data.cpu().numpy(), axis=1).tolist()
-
         if unsort:
             _, predictions, probs = [list(t) for t in zip(*sorted(zip(orig_idx,\
                     predictions, probs)))]

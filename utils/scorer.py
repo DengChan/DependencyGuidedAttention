@@ -1,29 +1,32 @@
+#!/usr/bin/env python
+
+"""
+Score the predictions with gold labels, using precision, recall and F1 metrics.
+"""
+
 import argparse
 import sys
 from collections import Counter
-import utils.constant as constant
-NO_RELATION = "no_relation"
 
+NO_RELATION = "no_relation"
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Score a prediction file using the gold labels.')
     parser.add_argument('gold_file', help='The gold relation file; one relation per line')
-    parser.add_argument('pred_file',
-                        help='A prediction file; one relation per line, in the same order as the gold file.')
+    parser.add_argument('pred_file', help='A prediction file; one relation per line, in the same order as the gold file.')
     args = parser.parse_args()
     return args
-
 
 def score(key, prediction, verbose=False):
     correct_by_relation = Counter()
     guessed_by_relation = Counter()
-    gold_by_relation = Counter()
+    gold_by_relation    = Counter()
 
     # Loop over the data to compute a score
     for row in range(len(key)):
         gold = key[row]
         guess = prediction[row]
-
+         
         if gold == NO_RELATION and guess == NO_RELATION:
             pass
         elif gold == NO_RELATION and guess != NO_RELATION:
@@ -47,7 +50,7 @@ def score(key, prediction, verbose=False):
             # (compute the score)
             correct = correct_by_relation[relation]
             guessed = guessed_by_relation[relation]
-            gold = gold_by_relation[relation]
+            gold    = gold_by_relation[relation]
             prec = 1.0
             if guessed > 0:
                 prec = float(correct) / float(guessed)
@@ -80,78 +83,17 @@ def score(key, prediction, verbose=False):
         print("Final Score:")
     prec_micro = 1.0
     if sum(guessed_by_relation.values()) > 0:
-        prec_micro = float(sum(correct_by_relation.values())) / float(sum(guessed_by_relation.values()))
+        prec_micro   = float(sum(correct_by_relation.values())) / float(sum(guessed_by_relation.values()))
     recall_micro = 0.0
     if sum(gold_by_relation.values()) > 0:
         recall_micro = float(sum(correct_by_relation.values())) / float(sum(gold_by_relation.values()))
     f1_micro = 0.0
     if prec_micro + recall_micro > 0.0:
         f1_micro = 2.0 * prec_micro * recall_micro / (prec_micro + recall_micro)
-    print("Precision (micro): {:.3%}".format(prec_micro))
-    print("   Recall (micro): {:.3%}".format(recall_micro))
-    print("       F1 (micro): {:.3%}".format(f1_micro))
+    print( "Precision (micro): {:.3%}".format(prec_micro) )
+    print( "   Recall (micro): {:.3%}".format(recall_micro) )
+    print( "       F1 (micro): {:.3%}".format(f1_micro) )
     return prec_micro, recall_micro, f1_micro
-
-
-def semeval_score(key, prediction, verbose=False):
-    counter = {}
-    for k, v in constant.LABEL_TO_ID.items():
-        if k == constant.NEGATIVE_LABEL:
-            counter[k] = {}
-            counter[k]["guess_total"] = 0
-            counter[k]["gold_total"] = 0
-            counter[k]["correct"] = 0
-            continue
-        counter[k[:-7]] = {}
-        counter[k[:-7]]["guess_total"] = 0
-        counter[k[:-7]]["gold_total"] = 0
-        counter[k[:-7]]["correct"] = 0
-
-    # Loop over the data to compute a score
-    for row in range(len(key)):
-        gold = key[row]
-        guess = prediction[row]
-        if gold != constant.NEGATIVE_LABEL:
-            true_rel = gold[:-7]
-        else:
-            true_rel = constant.NEGATIVE_LABEL
-        if guess != constant.NEGATIVE_LABEL:
-            pred_rel = guess[:-7]
-        else:
-            pred_rel = constant.NEGATIVE_LABEL
-        if gold == guess:
-            counter[true_rel]["correct"] += 1
-        counter[true_rel]["gold_total"] += 1
-        counter[pred_rel]["guess_total"] += 1
-
-    total_f1 = 0
-    total_recall = 0
-    total_precision = 0
-    epsilion = 1e-6
-    for k, v in counter.items():
-        if k == constant.NEGATIVE_LABEL:
-            continue
-        recall = v["correct"]/v["gold_total"]
-        total_recall += recall
-        precision = v["correct"]/v["guess_total"]
-        total_precision += precision
-        f1 = 2*recall*precision/(recall+precision+epsilion)
-        total_f1 += f1
-        counter[k]["recall"] = recall
-        counter[k]["pre"] = precision
-        counter[k]["f1"] = f1
-
-    macro_f1 = total_f1/(len(counter)-1)
-    macro_recall = total_recall / (len(counter) - 1)
-    macro_precision = total_precision / (len(counter) - 1)
-
-    # Print the aggregate score
-    if verbose:
-        print("Final Score:")
-    print("Precision (macro): {:.3%}".format(macro_precision))
-    print("   Recall (macro): {:.3%}".format(macro_recall))
-    print("       F1 (macro): {:.3%}".format(macro_f1))
-    return macro_precision, macro_recall, macro_f1
 
 if __name__ == "__main__":
     # Parse the arguments from stdin
@@ -161,9 +103,9 @@ if __name__ == "__main__":
 
     # Check that the lengths match
     if len(prediction) != len(key):
-        print("Gold and prediction file must have same number of elements: %d in gold vs %d in prediction" % (
-        len(key), len(prediction)))
+        print("Gold and prediction file must have same number of elements: %d in gold vs %d in prediction" % (len(key), len(prediction)))
         exit(1)
-
+    
     # Score the predictions
     score(key, prediction, verbose=True)
+

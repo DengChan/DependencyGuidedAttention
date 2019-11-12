@@ -4,10 +4,9 @@ import torch.nn as nn
 from torch.autograd import Variable
 import numpy as np
 import math
-import copy
 
 from utils import constant, torch_utils
-from model.tree import Tree, head_to_tree, tree_to_adj
+from model.tree import head_to_tree, tree_to_adj
 
 MAX_SEQ_LEN = 300
 
@@ -22,162 +21,109 @@ def Embedding(num_embeddings, embedding_dim, padding_idx=None):
 
 def gelu(x):
     # return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
-    return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
+    return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
-def PoolingLayer(inputs, pool_mask, subj_mask, obj_mask, pool_type):
-    h_out = pool(inputs, pool_mask, type=pool_type)
-    subj_out = pool(inputs, subj_mask, type=pool_type)
-    obj_out = pool(inputs, obj_mask, type=pool_type)
-    outputs = torch.cat([h_out, subj_out, obj_out], dim=1)
-    return outputs, h_out
+class SelfAttention(nn.Module):
+    def __init__(self, opt, input_dim):
+        super(SelfAttention, self).__init__()
+        if opt["hidden_dim"] % opt["num_heads"] != 0:
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention "
+                "heads (%d)" % (opt["hidden_dim"], opt["num_heads"]))
 
-
-class ScaledDotProductAttention(nn.Module):
-    def __init__(self, opt):
-        super(ScaledDotProductAttention, self).__init__()
-        self.d_k = opt["K_dim"]
-
-    def forward(self, Q, K, V, attn_mask, help_scores=None):
-        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k) # scores : [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]
-        scores.masked_fill_(attn_mask, -1e9) # Fills elements of self tensor with value where mask is one.
-
-        if help_scores is not None:
-            help_scores_mask = help_scores > -1e8
-            help_scores_mask_dep = help_scores_mask.float() * 0.5
-            help_scores_mask_seq = help_scores_mask.float() * 0.5 + help_scores_mask.int().eq(0).float()
-            scores = help_scores * help_scores_mask_dep + scores*help_scores_mask_seq
-
-        attn = nn.Softmax(dim=-1)(scores)
-        context = torch.matmul(attn, V)
-        return context, attn
-
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
-        super(MultiHeadAttention, self).__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
         self.opt = opt
-        self.d_k = opt["K_dim"]
-        self.d_v = opt["V_dim"]
-        self.n_heads = opt["num_heads"]
-        self.W_Q = nn.Linear(input_dim, self.d_k * self.n_heads)
-        self.W_K = nn.Linear(input_dim, self.d_k * self.n_heads)
-        self.W_V = nn.Linear(input_dim, self.d_v * self.n_heads)
-        self.DotProductAttention = ScaledDotProductAttention(opt)
-        self.Wout = nn.Linear(self.n_heads * self.d_v, self.output_dim)
-        self.layerNorm = nn.LayerNorm(self.output_dim)
-
-    def forward(self, Q, K, V, attn_mask, help_scores=None):
-        # q: [batch_size x len_q x d_model], k: [batch_size x len_k x d_model], v: [batch_size x len_k x d_model]
-        residual, batch_size = Q, Q.size(0)
-        # (B, S, D) -proj-> (B, S, D) -split-> (B, S, H, W) -trans-> (B, H, S, W)
-        try:
-            q_s = self.W_Q(Q).view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)  # q_s: [batch_size x n_heads x len_q x d_k]
-        except:
-            print("ERROR")
-        k_s = self.W_K(K).view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)  # k_s: [batch_size x n_heads x len_k x d_k]
-        v_s = self.W_V(V).view(batch_size, -1, self.n_heads, self.d_v).transpose(1,2)  # v_s: [batch_size x n_heads x len_k x d_v]
-
-        attn_mask = attn_mask.unsqueeze(1).repeat(1, self.n_heads, 1, 1) # attn_mask : [batch_size x n_heads x len_q x len_k]
-
-        # context: [batch_size x n_heads x len_q x d_v], attn: [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]
-        context, attn = self.DotProductAttention(q_s, k_s, v_s, attn_mask, help_scores)
-        context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.n_heads * self.d_v) # context: [batch_size x len_q x n_heads * d_v]
-        output = self.Wout(context)
-        if residual.size(-1) != output.size(-1):
-            return self.layerNorm(output), attn
-        return self.layerNorm(output + residual), attn # output: [batch_size x len_q x d_model]
-
-
-class PoswiseFeedForwardNet(nn.Module):
-    def __init__(self, input_dim, feedforward_dim, dropout_prob):
-        super(PoswiseFeedForwardNet, self).__init__()
         self.input_dim = input_dim
-        self.feedforward_dim = feedforward_dim
-        self.conv1 = nn.Conv1d(in_channels=self.input_dim, out_channels=self.feedforward_dim, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=self.feedforward_dim, out_channels=self.input_dim, kernel_size=1)
-        self.drop = nn.Dropout(dropout_prob)
-        self.layerNorm = nn.LayerNorm(self.input_dim)
+        self.num_attention_heads = opt["num_heads"]
+        self.attention_head_size = int(opt["hidden_dim"] / self.num_attention_heads)
+        # self.all_head_size = self.num_attention_heads * self.attention_head_size
+        self.all_head_size = opt["hidden_dim"]
+        # 正常情况下 input_dim 应该等于 opt["hidden_dim"],
+        # 这是为了处理直接将word emmbeddings输入 导致的维度的问题
+        self.query = nn.Linear(input_dim, self.all_head_size)
+        self.key = nn.Linear(input_dim, self.all_head_size)
+        self.value = nn.Linear(input_dim, self.all_head_size)
 
-    def forward(self, inputs):
-        residual = self.drop(inputs) # inputs : [batch_size, len_q, d_model]
-        output = gelu(self.conv1(inputs.transpose(1, 2)))
-        output = self.conv2(output).transpose(1, 2)
-        return self.layerNorm(output + residual)
+        self.dropout = nn.Dropout(opt["input_dropout"])
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(self, hidden_states, attention_mask=None):
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        if attention_mask is not None:
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+            attention_mask = attention_mask.unsqueeze(1).repeat(1, self.num_attention_heads, 1, 1).float() * -10000.0
+            attention_scores = attention_scores + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        return context_layer, attention_probs
+
+
+class Intermediate(nn.Module):
+    def __init__(self, opt):
+        super(Intermediate, self).__init__()
+        self.dense = nn.Linear(opt["hidden_dim"], opt["feedforward_dim"])
+        self.intermediate_act_fn = gelu
+
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+        return hidden_states
+
+
+class SelfOutput(nn.Module):
+    def __init__(self, opt):
+        super(SelfOutput, self).__init__()
+        self.dense = nn.Linear(opt["feedforward_dim"], opt["hidden_dim"])
+        self.LayerNorm = nn.LayerNorm(opt["hidden_dim"])
+        self.dropout = nn.Dropout(opt["input_dropout"])
+
+    def forward(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
+    def __init__(self, opt, input_dim):
         super(EncoderLayer, self).__init__()
         self.opt = opt
         self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.enc_self_attn = MultiHeadAttention(opt, input_dim, output_dim)
-        self.pos_ffn = PoswiseFeedForwardNet(output_dim, opt["feedforward_dim"], opt["input_dropout"])
+        self.self = SelfAttention(opt, input_dim)
+        self.intermediate = Intermediate(opt)
+        self.output = SelfOutput(opt)
 
-    def forward(self, enc_inputs, enc_self_attn_mask, help_scores=None):
-        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs, enc_self_attn_mask, help_scores) # enc_inputs to same Q,K,V
-        enc_outputs = self.pos_ffn(enc_outputs) # enc_outputs: [batch_size x len_q x d_model]
-        return enc_outputs, attn
-
-
-class HyperLayer(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
-        super(HyperLayer, self).__init__()
-        self.opt = opt
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.SeqEncoderLayer = EncoderLayer(opt, input_dim, output_dim)
-        self.DepEncoderLayer = EncoderLayer(opt, input_dim, output_dim)
-
-    def forward(self, seq_inputs, dep_inputs,  seq_attn_mask, dep_attn_mask):
-        dep_outputs, dep_self_attn = self.DepEncoderLayer(dep_inputs, dep_attn_mask)
-        seq_outputs, seq_self_attn = self.SeqEncoderLayer(seq_inputs, seq_attn_mask, dep_self_attn)
-        return seq_outputs, seq_self_attn
-
-
-class Encoder(nn.Module):
-    def __init__(self, opt, input_dim, output_dim, layers):
-        super(Encoder, self).__init__()
-        self.opt = opt
-        self.layers = nn.ModuleList()
-        for i in range(layers):
-            if i == 0:
-                self.layers.append(EncoderLayer(opt, input_dim, output_dim))
-            else:
-                self.layers.append(EncoderLayer(opt, output_dim, output_dim))
-
-    def forward(self, input, attn_mask):
-        enc_self_attns = []
-        enc_outputs = input
-        for layer in self.layers:
-            enc_outputs, enc_self_attn = layer(enc_outputs, attn_mask)
-            enc_self_attns.append(enc_self_attn)
-        return enc_outputs, enc_self_attns
-
-
-class LSTMLayer(nn.Module):
-    def __init__(self, opt, in_dim, hidden_dim):
-        super(LSTMLayer, self).__init__()
-        self.opt = opt
-        self.hidden_dim = hidden_dim
-        input_size = in_dim
-        self.rnn = nn.LSTM(input_size, hidden_dim, opt['rnn_layers'], batch_first=True,
-                           dropout=opt['rnn_dropout'], bidirectional=True)
-        self.in_dim = hidden_dim * 2
-        self.rnn_drop = nn.Dropout(opt['rnn_dropout'])  # use on last layer output
-        # self.rnn_layer_norm = nn.LayerNorm(self.in_dim)
-
-    def forward(self, rnn_inputs, masks, batch_size):
-        seq_lens = list(masks.data.eq(constant.PAD_ID).long().sum(1).squeeze())
-        h0, c0 = rnn_zero_state(batch_size, self.hidden_dim, self.opt['rnn_layers'])
-        rnn_inputs = nn.utils.rnn.pack_padded_sequence(rnn_inputs, seq_lens, batch_first=True)
-        rnn_outputs, (ht, ct) = self.rnn(rnn_inputs, (h0, c0))
-        rnn_outputs, _ = nn.utils.rnn.pad_packed_sequence(rnn_outputs, batch_first=True)
-        rnn_outputs = self.rnn_drop(rnn_outputs)
-        return rnn_outputs
+    def forward(self, hidden_states, attention_mask=None):
+        attention_output, attn = self.self(hidden_states, attention_mask)
+        intermediate_output = self.intermediate(attention_output)
+        layer_output = self.output(intermediate_output, attention_output)
+        return layer_output, attn
 
 
 class InputLayer(nn.Module):
@@ -187,27 +133,22 @@ class InputLayer(nn.Module):
         self.emb_matrix = emb_matrix
 
         # create embedding layers
-        self.emb = Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
-        self.pos_emb = Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID) if opt['pos_dim'] > 0 else None
-        self.ner_emb = Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID) if opt['ner_dim'] is not None else None
-        if opt["dist_dim"] >0:
-            self.dist_emb = nn.Embedding(100, opt["dist_dim"], padding_idx=constant.PAD_ID)
+        self.emb = nn.Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
+        self.pos_emb = nn.Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID)
+        self.ner_emb = nn.Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID)
+        #self.dist_emb = Embedding(100, opt["dist_dim"], padding_idx=constant.PAD_ID) if opt['dist_dim'] > 0 else None
         self.input_dim = opt["emb_dim"] + opt["pos_dim"] + opt["ner_dim"]
-        if self.opt["rnn"]:
-            self.position_emb = nn.Embedding.from_pretrained(get_sinusoid_encoding_table(MAX_SEQ_LEN, 2 * self.opt["rnn_hidden"]),
-                                                             freeze=True)
-        else:
-            self.position_emb = nn.Embedding.from_pretrained(get_sinusoid_encoding_table(MAX_SEQ_LEN, self.input_dim),
-                                                             freeze=False)
+
+        self.position_embeddings = nn.Embedding(MAX_SEQ_LEN, self.input_dim)
         self.init_embeddings()
         self.in_drop = nn.Dropout(opt['input_dropout'])
+        self.LayerNorm = nn.LayerNorm(self.input_dim)
 
     def init_embeddings(self):
         if self.emb_matrix is None:
             self.emb.weight.data[1:, :].uniform_(-1.0, 1.0)
         else:
             self.emb_matrix = torch.from_numpy(self.emb_matrix)
-            self.emb_matrix[0] = 0.0
             self.emb.weight.data.copy_(self.emb_matrix)
         # decide finetuning
         if self.opt['topn'] <= 0:
@@ -223,46 +164,56 @@ class InputLayer(nn.Module):
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
         # padding 是1 词是0
+        input_shape = words.size()
         l = (masks.data.cpu().numpy() == 0).astype(np.int64).sum(1)
         maxlen = max(l)
-        batch = len(words)
+        batch = input_shape[0]
 
         # embedding 拼接
         word_embs = self.emb(words)
         embs = [word_embs]
-        if self.opt['pos_dim'] is not None:
-            pos_embs = self.pos_emb(pos)
-            embs += [pos_embs]
-        if self.opt['ner_dim'] is not None:
-            ner_embs = self.ner_emb(ner)
-            embs += [ner_embs]
+        pos_embs = self.pos_emb(pos)
+        embs += [pos_embs]
+        ner_embs = self.ner_emb(ner)
+        embs += [ner_embs]
         embs = torch.cat(embs, dim=2)
-        embs = self.in_drop(embs.cuda())
 
-        position = [i for i in range(1, maxlen + 1)]
-        position = torch.LongTensor(position).unsqueeze(0).repeat(batch, 1).cuda()
-        position_emb = self.position_emb(position)
+        position_ids = torch.arange(input_shape[1], dtype=torch.long, device=torch.device("cuda"))
+        position_ids = position_ids.unsqueeze(0).expand(input_shape)
 
-        adj, adj_r, dists = inputs_to_tree_dist(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, None, maxlen)
-        # 与LCA距离的embedding
-        dist_emb = None
-        if self.opt["dist_dim"] > 0:
-            dist_emb = self.dist_emb(dists)
+        embeddings = embs + self.position_embeddings(position_ids)
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.in_drop(embeddings)
 
-        if self.opt["directed"]:
-            adj = adj + adj_r
+        adj = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, maxlen)
 
-        # adjs_masks ： A^n  不同hop的adj mask
-        adjs_masks = []
-        adjs_masks.append(get_mask_from_adj(adj))
-        adj_i = copy.deepcopy(adj)
-        for i in range(2):
-            adj_i = torch.matmul(adj_i, adj.permute(0, 2, 1))
-            adjs_masks.append(get_mask_from_adj(adj_i))
+        dist_embs = None
+
         dep_mask = get_mask_from_adj(adj)
         # pad_mask = get_attn_pad_mask(words, words)
         pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
-        return embs, position_emb, dist_emb, dep_mask, pad_mask, seq_mask, adj, adjs_masks
+        return embeddings, dist_embs, dep_mask, pad_mask, seq_mask, adj
+
+
+class Encoder(nn.Module):
+    def __init__(self, opt, input_dim):
+        super(Encoder, self).__init__()
+        self.opt = opt
+        self.layers = nn.ModuleList()
+        for i in range(opt["num_layers"]):
+            if i == 0:
+                self.layers.append(EncoderLayer(opt, input_dim))
+            else:
+                self.layers.append(EncoderLayer(opt, opt["hidden_dim"]))
+
+    def forward(self, inputs, attn_mask):
+        enc_self_attns = []
+        seq_inputs = inputs
+        for layer in self.layers:
+            seq_outputs, seq_self_attn = layer(seq_inputs, attn_mask)
+            seq_inputs = seq_outputs
+            enc_self_attns.append(seq_self_attn)
+        return seq_inputs, enc_self_attns
 
 
 class DGAModel(nn.Module):
@@ -270,87 +221,49 @@ class DGAModel(nn.Module):
         super(DGAModel, self).__init__()
         self.opt = opt
         self.input_layer = InputLayer(opt, emb_matrix)
-        self.in_dim = self.input_layer.input_dim
-        # LSTM Layer
-        if opt["rnn"]:
-            self.LSTM = LSTMLayer(opt, self.input_layer.input_dim, opt["rnn_hidden"])
-            self.in_dim = opt["rnn_hidden"] * 2
 
-        # LCA 距离 Embedding dim
-        if self.opt["dist_dim"] > 0 :
-            self.in_dim += self.opt["dist_dim"]
-
-        self.Encoder = Encoder(opt, self.in_dim, opt["hidden_dim"], opt["num_layers"])
-        self.DEP_Encoder = Encoder(opt, opt["hidden_dim"], opt["hidden_dim"], opt["dep_layers"])
-
+        self.Encoder = Encoder(opt, self.input_layer.input_dim)
+        # add dist dim as hidden dim
+        hidden_dim = opt["hidden_dim"]
+        #self.DEP_Encoder = Encoder(opt, hidden_dim, hidden_dim)
         # output mlp layers
-        input_dim = opt["hidden_dim"] * 3
-        self.out_mlp = nn.Linear(input_dim, opt["hidden_dim"])
-        self.classifier = nn.Linear(opt["hidden_dim"], len(constant.LABEL_TO_ID))
-        # self.scorer = Scorer(opt)
+        input_dim = hidden_dim * 3
+        self.out_mlp = nn.Linear(input_dim, hidden_dim)
+        self.out_mlp_2 = nn.Linear(hidden_dim, hidden_dim)
+        self.classifier = nn.Linear(hidden_dim, len(constant.LABEL_TO_ID))
 
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
-        embs, position_emb, dist_emb, dep_mask, pad_mask, seq_mask, adj, adjs_masks = self.input_layer(inputs)
+        embs, dist_embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
 
-        encoder_inputs = embs
-
-        if self.opt["rnn"]:
-            encoder_inputs = self.LSTM(embs, masks, words.size()[0])
-
-        encoder_inputs = encoder_inputs + position_emb
-        if self.opt["dist_dim"] > 0:
-            encoder_inputs = torch.cat([encoder_inputs, dist_emb], -1)
-        seq_enc_outputs, seq_dec_enc_attns = self.Encoder(encoder_inputs, seq_mask)
-        dep_enc_outputs, dep_dec_enc_attns = self.DEP_Encoder(seq_enc_outputs, dep_mask)
-
+        # Context Encoder
+        seq_outputs, seq_self_attns = self.Encoder(embs, dep_mask)
+        # Dependency Encoder
+        # seq_outputs, dep_self_attns = self.DEP_Encoder(seq_outputs, dep_mask)
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
         pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
         pool_type = self.opt['pooling']
 
-        subj_out = pool(dep_enc_outputs, subj_mask, type=pool_type)
-        obj_out = pool(dep_enc_outputs, obj_mask, type=pool_type)
-        h_out = pool(dep_enc_outputs, pool_mask, type=pool_type)
-
-        outputs = torch.cat([subj_out, obj_out, h_out], -1)
-        outputs = gelu(self.out_mlp(outputs))
+        seq_subj_out = pool(seq_outputs, subj_mask, type=pool_type)
+        seq_obj_out = pool(seq_outputs, obj_mask, type=pool_type)
+        seq_h_out = pool(seq_outputs, pool_mask, type=pool_type)
+        outputs = torch.cat([seq_h_out, seq_subj_out, seq_obj_out], 1)
+        outputs = torch.relu(self.out_mlp(outputs))
+        outputs = torch.relu(self.out_mlp_2(outputs))
         scores = self.classifier(outputs)
         # hout 用于pooling 的l2正则
-        return scores, outputs
+        return scores, seq_h_out
 
 
-def inputs_to_tree_dist(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):
+def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, maxlen):
     head, words, subj_pos, obj_pos = head.cpu().numpy(), words.cpu().numpy(), subj_pos.cpu().numpy(), obj_pos.cpu().numpy()
-
-    trees = []
-    dists = []
-
-    for i in range(len(l)):
-        t, d = head_to_tree(head[i], words[i], l[i], prune, subj_pos[i], obj_pos[i], maxlen)
-        trees.append(t)
-        dists.append(d)
-    # adj 邻接边为边类型
-    adjs = []
-    adjs_r = []
-    for tree in trees:
-        adj = tree_to_adj(maxlen, tree)
-        adj_r = copy.deepcopy(adj.T)
-        adjs.append(adj.reshape(1, maxlen, maxlen))
-        adjs_r.append(adj_r.reshape(1, maxlen, maxlen))
-    adjs = np.concatenate(adjs, axis=0)
-    adjs_r = np.concatenate(adjs_r, axis=0)
-    adjs = torch.from_numpy(adjs)
-    adjs_r = torch.from_numpy(adjs_r)
-    adjs = Variable(adjs.cuda())
-    adjs_r = Variable(adjs_r.cuda())
-
-    dists = np.array(dists, dtype=np.long)
-    dists = torch.from_numpy(dists)
-    dists = Variable(dists.cuda())
-
-    return adjs, adjs_r, dists
+    trees = [head_to_tree(head[i], words[i], l[i], prune, subj_pos[i], obj_pos[i]) for i in range(len(l))]
+    adj = [tree_to_adj(maxlen, tree, directed=False, self_loop=True).reshape(1, maxlen, maxlen) for tree in trees]
+    adj = np.concatenate(adj, axis=0)
+    adj = torch.from_numpy(adj)
+    return Variable(adj.cuda())
 
 
 def get_sinusoid_encoding_table(n_position, d_model):
@@ -367,12 +280,6 @@ def get_sinusoid_encoding_table(n_position, d_model):
 
 
 def get_mask_from_adj(adj):
-    B = adj.size(0)
-    N = adj.size(1)
-
-    I = torch.eye(N).float().cuda()
-    I = I.unsqueeze(0).repeat(B, 1, 1)
-    adj = adj + I
 
     mask = adj.eq(0)
     return mask.cuda()
@@ -415,13 +322,3 @@ def pool(h, mask, type='max'):
     else:
         h = h.masked_fill(mask, 0)
         return h.sum(1)
-
-
-def rnn_zero_state(batch_size, hidden_dim, num_layers, bidirectional=True, use_cuda=True):
-    total_layers = num_layers * 2 if bidirectional else num_layers
-    state_shape = (total_layers, batch_size, hidden_dim)
-    h0 = c0 = Variable(torch.zeros(*state_shape), requires_grad=False)
-    if use_cuda:
-        return h0.cuda(), c0.cuda()
-    else:
-        return h0, c0

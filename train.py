@@ -20,39 +20,36 @@ from model.trainer import GCNTrainer
 from utils import torch_utils, scorer, constant, helper
 from utils.vocab import Vocab
 
-from tensorboardX import SummaryWriter
-
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_dir', type=str, default='dataset')
-parser.add_argument('--vocab_dir', type=str, default='dataset/tacred/vocab')
+parser.add_argument('--data_dir', type=str, default='dataset/origin')
+parser.add_argument('--vocab_dir', type=str, default='dataset/origin/vocab')
+# Input
 # Input
 parser.add_argument('--emb_dim', type=int, default=300, help='Word embedding dimension.')
-parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
-parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
-parser.add_argument('--dist_dim', type=int, default=50, help='POS embedding dimension.')
+parser.add_argument('--ner_dim', type=int, default=30, help='NER embedding dimension.')
+parser.add_argument('--pos_dim', type=int, default=30, help='POS embedding dimension.')
+parser.add_argument('--dist_dim', type=int, default=56, help='LCA distance embedding dimension.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
 
 # RNN
 parser.add_argument('--rnn', type=bool, default=False, help="whether use rnn.")
-parser.add_argument('--rnn_layers', type=int, default=2, help='Num of rnn layers.')
-parser.add_argument('--rnn_hidden', type=int, default=128, help='Num of rnn hidden.')
+parser.add_argument('--rnn_layers', type=int, default=1, help='Num of rnn layers.')
+parser.add_argument('--rnn_hidden', type=int, default=200, help='Num of rnn hidden.')
 parser.add_argument('--rnn_dropout', type=float, default=0.1, help='Input dropout rate.')
 
 # Attention
-parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
-parser.add_argument('--V_dim', type=int, default=64, help='V dimension.')
-parser.add_argument('--num_heads', type=int, default=4, help='num of heads')
-parser.add_argument('--feedforward_dim', type=int, default=512, help='feedforward dim')
-parser.add_argument('--hidden_dim', type=int, default=256, help='hidden state size.')
-parser.add_argument('--num_layers', type=int, default=3, help='Num of Sequence Encoder layers.')
-parser.add_argument('--dep_layers', type=int, default=3, help='Num of Dependency Encoder layers.')
+parser.add_argument('--num_heads', type=int, default=2, help='num of heads')
+parser.add_argument('--feedforward_dim', type=int, default=2048, help='feedforward dim')
+parser.add_argument('--hidden_dim', type=int, default=512, help='hidden state size.')
+parser.add_argument('--num_layers', type=int, default=2, help='Num of Sequence Encoder layers.')
+parser.add_argument('--dep_layers', type=int, default=0, help='Num of Dependency Encoder layers.')
 
 
 parser.add_argument('--word_dropout', type=float, default=0.02, help='The rate at which randomly set a word to UNK.')
-parser.add_argument('--topn', type=int, default=7000, help='Only finetune top N word embeddings.')
+parser.add_argument('--topn', type=int, default=1e10, help='Only finetune top N word embeddings.')
 parser.add_argument('--lower', dest='lower', action='store_true', help='Lowercase all words.')
 parser.add_argument('--no-lower', dest='lower', action='store_false')
 parser.set_defaults(lower=False)
@@ -60,15 +57,15 @@ parser.set_defaults(lower=False)
 parser.add_argument('--directed', type=bool, default=True, help="whether use double direction edge.")
 
 parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
-parser.add_argument('--conv_l2', type=float, default=1e-5, help='L2-weight decay on conv layers only.')
+parser.add_argument('--conv_l2', type=float, default=0.0, help='L2-weight decay on conv layers only.')
 parser.add_argument('--pooling', choices=['max', 'avg', 'sum'], default='max', help='Pooling function type. Default max.')
-parser.add_argument('--pooling_l2', type=float, default=0, help='L2-penalty for all pooling output.')
+parser.add_argument('--pooling_l2', type=float, default=0.0, help='L2-penalty for all pooling output.')
 parser.add_argument('--no_adj', dest='no_adj', action='store_true', help="Zero out adjacency matrix for ablation.")
 
 parser.add_argument('--lr', type=float, default=0.01, help='Applies to sgd and adagrad.')
-parser.add_argument('--lr_decay', type=float, default=0.9, help='Learning rate decay rate.')
+parser.add_argument('--lr_decay', type=float, default=0.98, help='Learning rate decay rate.')
 parser.add_argument('--decay_epoch', type=int, default=5, help='Decay learning rate after this epoch.')
-parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta'], default='sgd',
+parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta'], default='adagrad',
                     help='Optimizer:sgd, adagrad, adam or adamax.')
 parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
 parser.add_argument('--batch_size', type=int, default=64, help='Training batch size.')
@@ -80,7 +77,7 @@ parser.add_argument('--save_dir', type=str, default='./saved_models', help='Root
 parser.add_argument('--id', type=str, default='00', help='Model ID under which to save models.')
 parser.add_argument('--info', type=str, default='', help='Optional info for the experiment.')
 
-parser.add_argument('--seed', type=int, default=42)
+parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--cuda', type=bool, default=torch.cuda.is_available())
 parser.add_argument('--cpu', action='store_true', help='Ignore CUDA.')
 
@@ -91,7 +88,7 @@ args = parser.parse_args()
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
-random.seed(2468)
+random.seed(1234)
 if args.cpu:
     args.cuda = False
 elif args.cuda:
@@ -145,14 +142,12 @@ else:
 id2label = dict([(v,k) for k,v in label2id.items()])
 dev_score_history = []
 current_lr = opt['lr']
-lr_change = True
 
 global_step = 0
 global_start_time = time.time()
 format_str = '{}: step {}/{} (epoch {}/{}), loss = {:.6f} ({:.3f} sec/batch), lr: {:.6f}'
 max_steps = len(train_batch) * opt['num_epoch']
 
-writer = SummaryWriter()
 # start training
 for epoch in range(1, opt['num_epoch']+1):
     train_loss = 0
@@ -166,9 +161,6 @@ for epoch in range(1, opt['num_epoch']+1):
             print(format_str.format(datetime.now(), global_step, max_steps, epoch,\
                     opt['num_epoch'], loss, duration, current_lr))
 
-        # train writer
-        writer.add_scalar('loss/train', loss, global_step)
-
     # eval on dev
     print("Evaluating on dev set...")
     predictions = []
@@ -177,24 +169,15 @@ for epoch in range(1, opt['num_epoch']+1):
         preds, _, loss = trainer.predict(batch)
         predictions += preds
         dev_loss += loss
-
     predictions = [id2label[p] for p in predictions]
     train_loss = train_loss / train_batch.num_examples * opt['batch_size'] # avg loss per batch
     dev_loss = dev_loss / dev_batch.num_examples * opt['batch_size']
 
     dev_p, dev_r, dev_f1 = scorer.score(dev_batch.gold(), predictions)
-
     print("epoch {}: train_loss = {:.6f}, dev_loss = {:.6f}, dev_f1 = {:.4f}".format(epoch,\
         train_loss, dev_loss, dev_f1))
     dev_score = dev_f1
     file_logger.log("{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}".format(epoch, train_loss, dev_loss, dev_score, max([dev_score] + dev_score_history)))
-
-    # dev writer
-    writer.add_scalar('loss/dev', dev_loss, epoch)
-    # metrics writer
-    writer.add_scalar('metrics/P', dev_p, epoch)
-    writer.add_scalar('metrics/R', dev_r, epoch)
-    writer.add_scalar('metrics/F1', dev_f1, epoch)
 
     # save
     model_file = model_save_dir + '/checkpoint_epoch_{}.pt'.format(epoch)
@@ -209,14 +192,9 @@ for epoch in range(1, opt['num_epoch']+1):
 
     # lr schedule
     if len(dev_score_history) > opt['decay_epoch'] and dev_score <= dev_score_history[-1] and \
-            opt['optim'] in ['sgd', 'adagrad', 'adadelta', 'adam', 'adamax']:
+            opt['optim'] in ['sgd', 'adagrad', 'adadelta']:
         current_lr *= opt['lr_decay']
         trainer.update_lr(current_lr)
-    if len(dev_score_history) > 1000 and lr_change:
-        trainer.load(model_save_dir + '/best_model.pt')
-        trainer.optimizer = torch_utils.get_optimizer('adadelta', trainer.parameters, 0.005)
-        lr_change = False
-        print("=================================Optimizer changed!============================================")
 
     dev_score_history += [dev_score]
     print("")

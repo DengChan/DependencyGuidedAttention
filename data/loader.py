@@ -56,7 +56,6 @@ class DataLoader(object):
             ner = map_to_ids(d['stanford_ner'], constant.NER_TO_ID)
             deprel = map_to_ids(d['stanford_deprel'], constant.DEPREL_TO_ID)
             head = [int(x) for x in d['stanford_head']]
-            # 判断是否有head=0的根结点
             assert any([x == 0 for x in head])
             l = len(tokens)
             subj_positions = get_positions(d['subj_start'], d['subj_end'], l)
@@ -97,7 +96,6 @@ class DataLoader(object):
 
         # convert to tensors
         words = get_long_tensor(words, batch_size)
-        # padding为1 词为0
         masks = torch.eq(words, 0)
         pos = get_long_tensor(batch[1], batch_size)
         ner = get_long_tensor(batch[2], batch_size)
@@ -135,10 +133,6 @@ def get_long_tensor(tokens_list, batch_size):
 
 def sort_all(batch, lens):
     """ Sort all fields by descending order of lens, and return the original indices. """
-    # 三维的列表，每一维分别为 句子长度,序号,数据
-    # 如:[[l0,l1,l2],[0,1,2],[d0,d1,d2]]
-    # => [[l0,0,d0],[l1,1,d1],[l2,2,d2]] => 按 l 降序排序
-    # => 再解压变回来  
     unsorted_all = [lens] + [range(len(lens))] + list(batch)
     sorted_all = [list(t) for t in zip(*sorted(zip(*unsorted_all), reverse=True))]
     return sorted_all[2:], sorted_all[1]

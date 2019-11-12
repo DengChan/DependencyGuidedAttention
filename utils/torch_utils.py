@@ -30,7 +30,8 @@ class MyAdagrad(Optimizer):
             for p in group['params']:
                 state = self.state[p]
                 state['step'] = 0
-                state['sum'] = torch.ones(p.data.size()).type_as(p.data) * init_accu_value
+                state['sum'] = torch.ones(p.data.size()).type_as(p.data) *\
+                        init_accu_value
 
     def share_memory(self):
         for group in self.param_groups:
@@ -88,10 +89,8 @@ class MyAdagrad(Optimizer):
 
         return loss
 
-
-# torch specific functions
+### torch specific functions
 def get_optimizer(name, parameters, lr, l2=0):
-
     if name == 'sgd':
         return torch.optim.SGD(parameters, lr=lr, weight_decay=l2)
     elif name in ['adagrad', 'myadagrad']:
@@ -128,7 +127,6 @@ def keep_partial_grad(grad, topk):
     """
     assert topk < grad.size(0)
     grad.data[topk:].zero_()
-    grad.data[0].zero_()
     return grad
 
 ### model IO

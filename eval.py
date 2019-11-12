@@ -5,7 +5,6 @@ import random
 import argparse
 from tqdm import tqdm
 import torch
-import json
 
 from data.loader import DataLoader
 from model.trainer import GCNTrainer
@@ -13,8 +12,8 @@ from utils import torch_utils, scorer, constant, helper
 from utils.vocab import Vocab
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model_dir', type=str, default='saved_models/00',help='Directory of the model.')
-parser.add_argument('--model', type=str, default='best_model.pt', help='Name of the model file.')
+parser.add_argument('model_dir', type=str, help='Directory of the model.')
+parser.add_argument('--model', type=str, default='checkpoint_epoch_100.pt', help='Name of the model file.')
 parser.add_argument('--data_dir', type=str, default='dataset/tacred')
 parser.add_argument('--dataset', type=str, default='test', help="Evaluate on dev or test.")
 
@@ -60,29 +59,8 @@ for i, b in enumerate(batch_iter):
     all_probs += probs
 
 predictions = [id2label[p] for p in predictions]
-p, r, f1 = scorer.score(batch.gold(), predictions)
-
-
-fjson = open(data_file, 'r')
-origin_data = json.load(fjson)
-fjson.close()
-with open("eval_output.txt", 'a') as f:
-    f.write("True Label\tPrediction\tSubject\tObject\tSentence")
-    for i in range(len(predictions)):
-        if batch.gold()[i] != predictions[i]:
-            ss = origin_data[i]['subj_start']
-            se = origin_data[i]['subj_end']
-            os = origin_data[i]['obj_start']
-            oe = origin_data[i]['obj_end']
-
-            token = origin_data[i]['token']
-            subj = " ".join(token[ss:ss + 1])
-            obj = " ".join(token[os:os + 1])
-            sent = " ".join(token)
-            f.write("{}\t{}\t{}\t{}\t{}\n".format(batch.gold()[i], predictions[i], subj, obj, sent))
-
-
-print("{} set evaluate result: {:.2f}\t{:.2f}\t{:.2f}".format(args.dataset, p, r, f1))
+p, r, f1 = scorer.score(batch.gold(), predictions, verbose=True)
+print("{} set evaluate result: {:.2f}\t{:.2f}\t{:.2f}".format(args.dataset,p,r,f1))
 
 print("Evaluation ended.")
 
