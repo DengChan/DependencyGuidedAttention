@@ -156,6 +156,8 @@ def semeval_score(key, prediction, verbose=False):
 
 
 def every_score(key, prediction):
+    key = [int(constant.LABEL_TO_ID[k]) for k in key]
+    prediction = [int(constant.LABEL_TO_ID[k]) for k in prediction]
     labels = [v for k, v in constant.LABEL_TO_ID.items()]
     id2label = {v: k for k, v in constant.LABEL_TO_ID.items()}
     p_class, r_class, f_class, support_micro = precision_recall_fscore_support(key, prediction, labels=labels)

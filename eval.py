@@ -43,7 +43,7 @@ vocab = Vocab(vocab_file, load=True)
 assert opt['vocab_size'] == vocab.size, "Vocab size must match that in the saved model."
 
 # load data
-data_file = opt['data_dir'] + '/{}.json'.format(args.dataset)
+data_file = args.data_dir + '/{}.json'.format(args.dataset)
 print("Loading data from {} with batch size {}...".format(data_file, opt['batch_size']))
 batch = DataLoader(data_file, opt['batch_size'], opt, vocab, evaluation=True)
 
@@ -67,7 +67,7 @@ class_score = scorer.every_score(batch.gold(), predictions)
 fjson = open(data_file, 'r')
 origin_data = json.load(fjson)
 fjson.close()
-with open("eval_output.txt", 'a') as f:
+with open("eval_output.txt", 'a', encoding='utf-8') as f:
     f.write("True Label\tPrediction\tSubject\tObject\tSentence\n")
     for i in range(len(predictions)):
         if batch.gold()[i] != predictions[i]:
