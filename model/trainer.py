@@ -23,9 +23,9 @@ class Trainer(object):
         raise NotImplementedError
 
     def update_lr(self, new_lr):
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = param_group['lr'] * self.opt['lr_decay']
-        # torch_utils.change_lr(self.optimizer, new_lr)
+        # for param_group in self.optimizer.param_groups:
+        #     param_group['lr'] = param_group['lr'] * self.opt['lr_decay']
+        torch_utils.change_lr(self.optimizer, new_lr)
 
     def load(self, filename):
         try:

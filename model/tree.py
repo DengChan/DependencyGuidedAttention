@@ -1,4 +1,4 @@
-"""
+﻿"""
 Basic operations on trees.
 """
 
@@ -64,7 +64,6 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, maxlen):
     head = head[:len_].tolist()
     root = None
 
-
     nodes = [Tree() for _ in head]
 
     for i in range(len(nodes)):
@@ -127,6 +126,23 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, maxlen):
     # compute distance to path_nodes
     dist = [-1 if i not in path_nodes else 0 for i in range(len_)]
 
+    # 剪枝
+    if prune > -1:
+        highest_node = lca
+        nodes = [Tree() if dist[i] <= prune else None for i in range(len_)]
+        for i in range(len(nodes)):
+            if nodes[i] is None:
+                continue
+            h = head[i]
+            nodes[i].idx = i
+            nodes[i].dist = dist[i]
+            if h > 0 and i != highest_node:
+                assert nodes[h - 1] is not None
+                nodes[h - 1].add_child(nodes[i])
+
+        root = nodes[highest_node]
+
+    # 与LCA的距离
     for i in range(len_):
         if dist[i] < 0:
             stack = [i]
@@ -152,6 +168,7 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, maxlen):
     while len(dist) < maxlen:
         dist.append(0)
     assert len(dist) == maxlen
+
     assert root is not None
     return root, dist
 
@@ -161,19 +178,22 @@ def tree_to_adj(sent_len, tree):
     Convert a tree object to an (numpy) adjacency matrix.
     """
     ret = np.zeros((sent_len, sent_len), dtype=np.float32)
-    # tree是一个可迭代的对象 深度优先遍历
+
     queue = [tree]
     idx = []
     while len(queue) > 0:
         t, queue = queue[0], queue[1:]
 
         idx += [t.idx]
-        children=[]
+
         for c in t.children:
             ret[t.idx, c.idx] = 1
-            children.append(c)
-            
-        queue += children
+        queue += t.children
+
+    ret = ret + ret.T
+
+    for i in idx:
+        ret[i, i] = 1
 
     return ret
 

@@ -62,12 +62,13 @@ for i, b in enumerate(batch_iter):
 predictions = [id2label[p] for p in predictions]
 p, r, f1 = scorer.score(batch.gold(), predictions)
 
+class_score = scorer.every_score(batch.gold(), predictions)
 
 fjson = open(data_file, 'r')
 origin_data = json.load(fjson)
 fjson.close()
 with open("eval_output.txt", 'a') as f:
-    f.write("True Label\tPrediction\tSubject\tObject\tSentence")
+    f.write("True Label\tPrediction\tSubject\tObject\tSentence\n")
     for i in range(len(predictions)):
         if batch.gold()[i] != predictions[i]:
             ss = origin_data[i]['subj_start']
@@ -80,6 +81,12 @@ with open("eval_output.txt", 'a') as f:
             obj = " ".join(token[os:os + 1])
             sent = " ".join(token)
             f.write("{}\t{}\t{}\t{}\t{}\n".format(batch.gold()[i], predictions[i], subj, obj, sent))
+
+
+with open("scores.txt", 'a', encoding='utf-8') as f:
+    f.write("Label\tP Score\tR Score\t F1 Score\n")
+    for k, v in class_score.items():
+        f.write("{}\t{}\t{}\t{}\n".format(k, v[0], v[1], v[2]))
 
 
 print("{} set evaluate result: {:.2f}\t{:.2f}\t{:.2f}".format(args.dataset, p, r, f1))

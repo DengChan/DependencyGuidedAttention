@@ -2,6 +2,7 @@ import argparse
 import sys
 from collections import Counter
 import utils.constant as constant
+from sklearn.metrics import precision_recall_fscore_support
 NO_RELATION = "no_relation"
 
 
@@ -152,6 +153,18 @@ def semeval_score(key, prediction, verbose=False):
     print("   Recall (macro): {:.3%}".format(macro_recall))
     print("       F1 (macro): {:.3%}".format(macro_f1))
     return macro_precision, macro_recall, macro_f1
+
+
+def every_score(key, prediction):
+    labels = [v for k, v in constant.LABEL_TO_ID.items()]
+    id2label = {v: k for k, v in constant.LABEL_TO_ID.items()}
+    p_class, r_class, f_class, support_micro = precision_recall_fscore_support(key, prediction, labels=labels)
+    assert len(p_class) == len(constant.LABEL_TO_ID)
+
+    class_score = {id2label[i]: [p_class[i], r_class[i], f_class[i]] for i in range(len(p_class))}
+
+    return class_score
+
 
 if __name__ == "__main__":
     # Parse the arguments from stdin
