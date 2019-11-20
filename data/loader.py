@@ -9,6 +9,7 @@ import numpy as np
 
 from utils import constant, helper, vocab
 
+
 class DataLoader(object):
     """
     Load data from json files, preprocess and prepare batches.

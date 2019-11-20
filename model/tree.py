@@ -56,11 +56,10 @@ class Tree(object):
             for x in c:
                 yield x
 
-def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, maxlen):
+def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
     """
     Convert a sequence of head indexes into a tree object.
     """
-    tokens = tokens[:len_].tolist()
     head = head[:len_].tolist()
     root = None
 
@@ -165,9 +164,6 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos, maxlen):
             dist[i] = d+1
         else:
             dist[i] = 0
-    while len(dist) < maxlen:
-        dist.append(0)
-    assert len(dist) == maxlen
 
     assert root is not None
     return root, dist

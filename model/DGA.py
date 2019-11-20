@@ -8,6 +8,8 @@ import math
 from utils import constant, torch_utils
 from model.tree import Tree, head_to_tree, tree_to_adj
 
+from model.bert import BertConfig, BertForTokenClassification, BertTokenizer, BertModel
+
 MAX_SEQ_LEN = 100
 
 
@@ -150,39 +152,11 @@ class LSTMLayer(nn.Module):
 
 
 class InputLayer(nn.Module):
-    def __init__(self, opt, emb_matrix=None):
+    def __init__(self, opt):
         super().__init__()
         self.opt = opt
-        self.emb_matrix = emb_matrix
-
-        # create embedding layers
-        self.emb = Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
         self.pos_emb = Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID)
         self.ner_emb = Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID)
-        #self.dist_emb = Embedding(100, opt["dist_dim"], padding_idx=constant.PAD_ID) if opt['dist_dim'] > 0 else None
-        self.input_dim = opt["emb_dim"] + opt["pos_dim"] + opt["ner_dim"]
-
-        self.position_emb = nn.Embedding.from_pretrained(get_sinusoid_encoding_table(MAX_SEQ_LEN, self.input_dim), freeze=True)
-        self.init_embeddings()
-        self.in_drop = nn.Dropout(opt['input_dropout'])
-
-    def init_embeddings(self):
-        if self.emb_matrix is None:
-            self.emb.weight.data[1:, :].uniform_(-1.0, 1.0)
-        else:
-            self.emb_matrix = torch.from_numpy(self.emb_matrix)
-            self.emb_matrix[0] = 0.0
-            self.emb.weight.data.copy_(self.emb_matrix)
-        # decide finetuning
-        if self.opt['topn'] <= 0:
-            print("Do not finetune word embedding layer.")
-            self.emb.weight.requires_grad = False
-        elif self.opt['topn'] < self.opt['vocab_size']:
-            print("Finetune top {} word embeddings.".format(self.opt['topn']))
-            self.emb.weight.register_hook(lambda x: \
-                    torch_utils.keep_partial_grad(x, self.opt['topn']))
-        else:
-            print("Finetune all embeddings.")
 
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
@@ -191,22 +165,8 @@ class InputLayer(nn.Module):
         maxlen = max(l)
         batch = len(words)
 
-        # embedding 拼接
-        word_embs = self.emb(words)
-        embs = [word_embs]
-        if self.opt['pos_dim'] is not None:
-            pos_embs = self.pos_emb(pos)
-            embs += [pos_embs]
-        if self.opt['ner_dim'] is not None:
-            ner_embs = self.ner_emb(ner)
-            embs += [ner_embs]
-        embs = torch.cat(embs, dim=2)
-
-        position = [i for i in range(1, maxlen+1)]
-        position = torch.LongTensor(position).unsqueeze(0).repeat(batch, 1).cuda()
-
-        embs = embs + self.position_emb(position)
-        embs = self.in_drop(embs.cuda())
+        pos_embs = self.pos_emb(pos)
+        ner_embs = self.ner_emb(ner)
 
         adj, dists = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, deprel, maxlen)
 
@@ -215,19 +175,17 @@ class InputLayer(nn.Module):
         dep_mask = get_mask_from_adj(adj)
         # pad_mask = get_attn_pad_mask(words, words)
         pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
-        return embs, dist_embs, dep_mask, pad_mask, seq_mask, adj
+        return pos_embs, ner_embs, dist_embs, dep_mask, pad_mask, seq_mask, adj
 
 
 class Encoder(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
+    def __init__(self, opt):
         super(Encoder, self).__init__()
         self.opt = opt
-        self.layers = nn.ModuleList()
-        for i in range(opt["num_layers"]):
-            if i == 0:
-                self.layers.append(EncoderLayer(opt, input_dim, output_dim))
-            else:
-                self.layers.append(EncoderLayer(opt, output_dim, output_dim))
+        self.config = BertConfig(opt["config_path"], cache_dir=opt["cache_dir"])
+        self.bert = BertModel.from_pretrained(opt["ber_model_path"], config=self.config,
+                                              cache_dir=opt["cache_dir"] if opt["cache_dir"] else None).cuda()
+
 
     def forward(self, input, attn_mask):
         enc_self_attns = []
@@ -248,7 +206,7 @@ class DGAModel(nn.Module):
         self.Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
         # add dist dim as hidden dim
         hidden_dim = opt["hidden_dim"]
-        #self.DEP_Encoder = Encoder(opt, hidden_dim, hidden_dim)
+
         # output mlp layers
         input_dim = hidden_dim * 3
         self.out_mlp = nn.Linear(input_dim, hidden_dim)
@@ -258,7 +216,7 @@ class DGAModel(nn.Module):
     def forward(self, inputs):
         words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
 
-        embs, dist_embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
+        pos_embs, ner_embs, dist_embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
 
         # Context Encoder
         seq_outputs, seq_self_attns = self.Encoder(embs, dep_mask)

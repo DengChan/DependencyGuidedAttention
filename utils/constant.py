@@ -8,8 +8,10 @@ PAD_TOKEN = '<PAD>'
 PAD_ID = 0
 UNK_TOKEN = '<UNK>'
 UNK_ID = 1
+SAME_TOKEN = '<SAME_TOKEN>'
 
 VOCAB_PREFIX = [PAD_TOKEN, UNK_TOKEN]
+
 
 # hard-coded mappings from fields to ids
 SUBJ_NER_TO_ID = {PAD_TOKEN: 0, UNK_TOKEN: 1, 'ORGANIZATION': 2, 'PERSON': 3}
@@ -22,7 +24,7 @@ POS_TO_ID = {PAD_TOKEN: 0, UNK_TOKEN: 1, 'NNP': 2, 'NN': 3, 'IN': 4, 'DT': 5, ',
 
 # DEPREL_TO_ID = {PAD_TOKEN: 0, UNK_TOKEN: 1, 'punct': 2, 'compound': 3, 'case': 4, 'nmod': 5, 'det': 6, 'nsubj': 7, 'amod': 8, 'conj': 9, 'dobj': 10, 'ROOT': 11, 'cc': 12, 'nmod:poss': 13, 'mark': 14, 'advmod': 15, 'appos': 16, 'nummod': 17, 'dep': 18, 'ccomp': 19, 'aux': 20, 'advcl': 21, 'acl:relcl': 22, 'xcomp': 23, 'cop': 24, 'acl': 25, 'auxpass': 26, 'nsubjpass': 27, 'nmod:tmod': 28, 'neg': 29, 'compound:prt': 30, 'mwe': 31, 'parataxis': 32, 'root': 33, 'nmod:npmod': 34, 'expl': 35, 'csubj': 36, 'cc:preconj': 37, 'iobj': 38, 'det:predet': 39, 'discourse': 40, 'csubjpass': 41}
 
-DEPREL_TO_ID = {PAD_TOKEN: 0, UNK_TOKEN: 1, 'dep': 2, 'aux': 3, 'auxpass': 4, 'cop': 5, 'ccomp': 6, 'xcomp': 6, 'mark': 6, 'compound': 6, 'compound:prt': 6, 'dobj': 7, 'iobj': 8, 'punct': 9, 'nsubj': 10, 'nsubjpass': 11, 'csubj': 12, 'csubjpass': 13, 'cc': 14, 'cc:preconj': 14, 'conj': 15, 'expl': 16, 'amod': 17, 'appos': 17, 'advcl': 17, 'det': 17, 'advmod': 17, 'neg': 17, 'nmod': 17, 'nmod:poss': 17, 'nummod': 17, 'nmod:tmod': 17, 'nmod:npmod': 17, 'det:predet': 17, 'parataxis': 18, 'case': 19, 'ROOT': 20, 'root': 20, 'acl:relcl': 21, 'acl': 21, 'mwe': 22, 'discourse': 23}
+DEPREL_TO_ID = {PAD_TOKEN: 0, UNK_TOKEN: 1, SAME_TOKEN: 24, 'dep': 2, 'aux': 3, 'auxpass': 4, 'cop': 5, 'ccomp': 6, 'xcomp': 6, 'mark': 6, 'compound': 6, 'compound:prt': 6, 'dobj': 7, 'iobj': 8, 'punct': 9, 'nsubj': 10, 'nsubjpass': 11, 'csubj': 12, 'csubjpass': 13, 'cc': 14, 'cc:preconj': 14, 'conj': 15, 'expl': 16, 'amod': 17, 'appos': 17, 'advcl': 17, 'det': 17, 'advmod': 17, 'neg': 17, 'nmod': 17, 'nmod:poss': 17, 'nummod': 17, 'nmod:tmod': 17, 'nmod:npmod': 17, 'det:predet': 17, 'parataxis': 18, 'case': 19, 'ROOT': 20, 'root': 20, 'acl:relcl': 21, 'acl': 21, 'mwe': 22, 'discourse': 23}
 # DEPREL_TO_ID = {PAD_TOKEN: 0, UNK_TOKEN: 1, 'dep': 2, 'aux': 3, 'auxpass': 4, 'cop': 5, 'ccomp': 6, 'xcomp': 6, 'mark': 6, 'compound': 6, 'compound:prt': 6, 'dobj': 7, 'iobj': 8, 'punct': 9, 'nsubj': 10, 'nsubjpass': 11, 'csubj': 12, 'csubjpass': 13, 'cc': 14, 'cc:preconj': 14, 'conj': 15, 'expl': 16, 'amod': 17, 'appos': 17, 'advcl': 17, 'det': 17, 'advmod': 17, 'neg': 17, 'nmod': 17, 'nmod:poss': 17, 'nummod': 17, 'nmod:tmod': 17, 'nmod:npmod': 17, 'det:predet': 17, 'parataxis': 18, 'case': 19, 'ROOT': 20, 'root': 20, 'acl:relcl': 21, 'acl': 21, 'mwe': 22, 'discourse': 23, 'r-dep': 24, 'r-aux': 25, 'r-auxpass': 26, 'r-cop': 27, 'r-ccomp': 28, 'r-xcomp': 28, 'r-mark': 28, 'r-compound': 28, 'r-compound:prt': 28, 'r-dobj': 29, 'r-iobj': 30, 'r-punct': 31, 'r-nsubj': 32, 'r-nsubjpass': 33, 'r-csubj': 34, 'r-csubjpass': 35, 'r-cc': 36, 'r-cc:preconj': 36, 'r-conj': 37, 'r-expl': 38, 'r-amod': 39, 'r-appos': 39, 'r-advcl': 39, 'r-det': 39, 'r-advmod': 39, 'r-neg': 39, 'r-nmod': 39, 'r-nmod:poss': 39, 'r-nummod': 39, 'r-nmod:tmod': 39, 'r-nmod:npmod': 39, 'r-det:predet': 39, 'r-parataxis': 40, 'r-case': 41, 'r-ROOT': 42, 'r-root': 42, 'r-acl:relcl': 43, 'r-acl': 43, 'r-mwe': 44, 'r-discourse': 45}
 
 DEPREL_COUNT = 22

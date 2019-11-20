@@ -29,12 +29,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', type=str, default='dataset/tacred')
 parser.add_argument('--vocab_dir', type=str, default='dataset/tacred/vocab')
 # Input
-# Input
 parser.add_argument('--emb_dim', type=int, default=300, help='Word embedding dimension.')
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
 parser.add_argument('--dist_dim', type=int, default=56, help='LCA distance embedding dimension.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
+parser.add_argument('--entity_mask', type=bool, default=False, help="whether use entity mask.")
 
 # RNN
 parser.add_argument('--rnn', type=bool, default=False, help="whether use rnn.")
