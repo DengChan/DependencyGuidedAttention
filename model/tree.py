@@ -56,11 +56,12 @@ class Tree(object):
             for x in c:
                 yield x
 
+
 def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
     """
     Convert a sequence of head indexes into a tree object.
     """
-    head = head[:len_].tolist()
+    head = head[:len_]
     root = None
 
     nodes = [Tree() for _ in head]
@@ -169,7 +170,7 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
     return root, dist
 
 
-def tree_to_adj(sent_len, tree):
+def tree_to_adj(sent_len, tree, only_child=False, self_loop=True):
     """
     Convert a tree object to an (numpy) adjacency matrix.
     """
@@ -186,10 +187,12 @@ def tree_to_adj(sent_len, tree):
             ret[t.idx, c.idx] = 1
         queue += t.children
 
-    ret = ret + ret.T
+    if not only_child:
+        ret = ret + ret.T
 
-    for i in idx:
-        ret[i, i] = 1
+    if self_loop:
+        for i in idx:
+            ret[i, i] = 1
 
     return ret
 

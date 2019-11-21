@@ -1,22 +1,19 @@
 """
 A trainer class.
 """
-
+from apex import amp
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Variable
-import numpy as np
 
 from model.DGA import DGAModel
-from model.Loss import FocalLoss, MyLoss
+from model.bert import AdamW, get_linear_schedule_with_warmup
 from utils import constant, torch_utils
 
+
 class Trainer(object):
-    def __init__(self, opt, emb_matrix=None):
+    def __init__(self, opt):
         raise NotImplementedError
 
-    def update(self, batch):
+    def update(self, batch, step):
         raise NotImplementedError
 
     def predict(self, batch):
@@ -48,63 +45,63 @@ class Trainer(object):
             print("[Warning: Saving failed... continuing anyway.]")
 
 
-def unpack_batch(batch, cuda):
-    if cuda:
-        inputs = [Variable(b.cuda()) for b in batch[:10]]
-        labels = Variable(batch[10].cuda())
-    else:
-        inputs = [Variable(b) for b in batch[:10]]
-        labels = Variable(batch[10])
-    tokens = batch[0]
-    head = batch[5]
-    subj_pos = batch[6]
-    obj_pos = batch[7]
-    lens = batch[1].eq(0).long().sum(1).squeeze()
-    return inputs, labels, tokens, head, subj_pos, obj_pos, lens
-
-
 class GCNTrainer(Trainer):
-    def __init__(self, opt, emb_matrix=None):
+    def __init__(self, opt, config):
         self.opt = opt
-        self.emb_matrix = emb_matrix
-        self.model = DGAModel(opt, emb_matrix=emb_matrix)
-        self.criterion = nn.CrossEntropyLoss()
+        self.model = DGAModel(opt, config)
         self.parameters = [p for p in self.model.parameters() if p.requires_grad]
         if opt['cuda']:
             self.model.cuda()
-            self.criterion.cuda()
-        self.optimizer = torch_utils.get_optimizer(opt['optim'], self.parameters, opt["lr"], opt["conv_l2"])
+        no_decay = ["bias", "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {"params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+             "weight_decay": opt["weight_decay"]},
+            {"params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+             "weight_decay": 0.0}
+        ]
+        self.optimizer = AdamW(optimizer_grouped_parameters, lr=opt["lr"], eps=opt["adam_epsilon"])
+        self.scheduler = get_linear_schedule_with_warmup(self.optimizer, num_warmup_steps=opt["warmup_steps"],
+                                                         num_training_steps=opt["t_total"])
+        # Prepare optimizer and schedule (linear warmup and decay)
+        if opt["fp16"]:
+            self.model, optimizer = amp.initialize(self.model, self.optimizer, opt_level=opt["fp16_opt_level"])
 
-    def update(self, batch):
-        inputs, labels, tokens, head, subj_pos, obj_pos, lens = unpack_batch(batch, self.opt['cuda'])
+        self.model.zero_grad()
 
+    def update(self, batch, step):
         # step forward
         self.model.train()
-        self.optimizer.zero_grad()
-        scores, pooling_output = self.model(inputs)
-        loss = self.criterion(scores, labels)
+        # self.optimizer.zero_grad()
+
+        rel_loss, pooling_output = self.model(batch)
         # l2 penalty on output representations
         if self.opt.get('pooling_l2', 0) > 0:
-            loss += self.opt['pooling_l2'] * (pooling_output ** 2).sum(1).mean()
-        loss_val = loss.item()
+            rel_loss += self.opt['pooling_l2'] * (pooling_output ** 2).sum(1).mean()
+        loss_val = rel_loss.item()
         # backward
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt['max_grad_norm'])
+        if self.opt["fp16"]:
+            with amp.scale_loss(rel_loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            rel_loss.backward()
+
+        if (step + 1) % self.opt["gradient_accumulation_steps"] == 0:
+            if self.opt["fp16"]:
+                torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), self.opt['max_grad_norm'])
+            else:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt['max_grad_norm'])
+
+        self.scheduler.step()
         self.optimizer.step()
+        self.model.zero_grad()
         # print(self.optimizer.param_groups)
         return loss_val
 
     def predict(self, batch, unsort=True):
-        inputs, labels, tokens, head, subj_pos, obj_pos, lens = unpack_batch(batch, self.opt['cuda'])
-        orig_idx = batch[11]
         # forward
         self.model.eval()
-        logits, _ = self.model(inputs)
-        loss = self.criterion(logits, labels)
-        probs = F.softmax(logits, 1).data.cpu().numpy().tolist()
-        predictions = np.argmax(logits.data.cpu().numpy(), axis=1).tolist()
+        loss, _ = self.model(batch)
+        predictions, probs = self.model.predict()
+        labels = self.model.get_labels()
 
-        if unsort:
-            _, predictions, probs = [list(t) for t in zip(*sorted(zip(orig_idx,\
-                    predictions, probs)))]
-        return predictions, probs, loss.item()
+        return predictions, labels, probs, loss.item()

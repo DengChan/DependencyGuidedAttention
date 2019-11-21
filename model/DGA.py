@@ -2,6 +2,8 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+import torch.nn.functional as F
+
 import numpy as np
 import math
 
@@ -179,83 +181,103 @@ class InputLayer(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, opt):
+    def __init__(self, opt, config):
         super(Encoder, self).__init__()
         self.opt = opt
-        self.config = BertConfig(opt["config_path"], cache_dir=opt["cache_dir"])
-        self.bert = BertModel.from_pretrained(opt["ber_model_path"], config=self.config,
-                                              cache_dir=opt["cache_dir"] if opt["cache_dir"] else None).cuda()
+        self.config = config
+        self.bert = BertModel(config)
+        self.load_bert_model()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def load_bert_model(self):
+        self.bert.from_pretrained(self.opt["model_name_or_path"],
+                                  config=self.config,
+                                  cache_dir=self.opt["cache_dir"] if self.opt["cache_dir"] else None)
+
+    def forward(self, input_ids, attention_mask, token_type_ids,
+                position_ids=None, head_mask=None, inputs_embeds=None, labels=None):
+        """
+        :return: outputs[0] : 最后一层的输出 [Batch X Length X Hidden Size]
+                outputs[1] : 每一个元素是每一层的输出[Batch X Length X Hidden Size] 的 list
+                outputs[2]: 每一层Attention值[Batch X Heads number X Length X Length]的 list
+        """
+
+        outputs = self.bert(input_ids,
+                            attention_mask=attention_mask,
+                            token_type_ids=token_type_ids,
+                            position_ids=position_ids,
+                            head_mask=head_mask,
+                            inputs_embeds=inputs_embeds)
+
+        outputs = (outputs[0],) + outputs[2:]  # add hidden states and attention if they are here
+        return outputs
 
 
-    def forward(self, input, attn_mask):
-        enc_self_attns = []
-        seq_inputs = input
-        for layer in self.layers:
-            seq_outputs, seq_self_attn = layer(seq_inputs, attn_mask)
-            seq_inputs = seq_outputs
-            enc_self_attns.append(seq_self_attn)
-        return seq_inputs, enc_self_attns
-
-
-class DGAModel(nn.Module):
-    def __init__(self, opt, emb_matrix=None):
-        super(DGAModel, self).__init__()
+class Decoder(nn.Module):
+    def __init__(self, opt, config):
+        super(Decoder, self).__init__()
         self.opt = opt
-        self.input_layer = InputLayer(opt, emb_matrix)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.out_mlp = nn.Linear(config.hidden_size*3, config.hidden_size)
+        self.classifier = nn.Linear(config.hidden_size, len(constant.LABEL_TO_ID))
 
-        self.Encoder = Encoder(opt, self.input_layer.input_dim, opt["hidden_dim"])
-        # add dist dim as hidden dim
-        hidden_dim = opt["hidden_dim"]
-
-        # output mlp layers
-        input_dim = hidden_dim * 3
-        self.out_mlp = nn.Linear(input_dim, hidden_dim)
-        self.out_mlp_2 = nn.Linear(hidden_dim, hidden_dim)
-        self.classifier = nn.Linear(hidden_dim, len(constant.LABEL_TO_ID))
-
-    def forward(self, inputs):
-        words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
-
-        pos_embs, ner_embs, dist_embs, dep_mask, pad_mask, seq_mask, adj = self.input_layer(inputs)
-
-        # Context Encoder
-        seq_outputs, seq_self_attns = self.Encoder(embs, dep_mask)
-        # Dependency Encoder
-        #seq_outputs, dep_self_attns = self.DEP_Encoder(seq_outputs, dep_mask)
+    def forward(self, seq_outputs, subj_pos, obj_pos, adj):
         # pooling
         subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
-        pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
+        if self.opt["deprel_edge"]:
+            adj_tmp = adj.eq(0).eq(0).long()
+            pool_mask = (adj_tmp.sum(2) + adj_tmp.sum(1)).eq(0).unsqueeze(2)
+        else:
+            pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
         pool_type = self.opt['pooling']
-
         seq_subj_out = pool(seq_outputs, subj_mask, type=pool_type)
         seq_obj_out = pool(seq_outputs, obj_mask, type=pool_type)
         seq_h_out = pool(seq_outputs, pool_mask, type=pool_type)
         outputs = torch.cat([seq_subj_out, seq_obj_out, seq_h_out], -1)
+        outputs = self.dropout(outputs)
         outputs = gelu(self.out_mlp(outputs))
-        outputs = gelu(self.out_mlp_2(outputs))
-        scores = self.classifier(outputs)
-        # hout 用于pooling 的l2正则
-        return scores, seq_h_out
+        logits = self.classifier(outputs)
+        return logits, seq_h_out
 
 
-def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, deprel=None, maxlen=100):
-    head, words, subj_pos, obj_pos = head.cpu().numpy(), words.cpu().numpy(), subj_pos.cpu().numpy(), obj_pos.cpu().numpy()
-    trees = [head_to_tree(head[i], words[i], l[i], prune, subj_pos[i], obj_pos[i], maxlen)[0] for i in range(len(l))]
-    dists = [head_to_tree(head[i], words[i], l[i], prune, subj_pos[i], obj_pos[i], maxlen)[1] for i in range(len(l))]
-    # adj 邻接边为边类型
-    adjs = []
-    for tree in trees:
-        adj = tree_to_adj(maxlen, tree)
-        adjs.append(adj.reshape(1, maxlen, maxlen))
-    adjs = np.concatenate(adjs, axis=0)
-    adjs = torch.from_numpy(adjs)
-    adjs = Variable(adjs.cuda())
+class DGAModel(nn.Module):
+    def __init__(self, opt, config):
+        super(DGAModel, self).__init__()
+        self.opt = opt
 
-    dists = np.array(dists, dtype=np.long)
-    dists = torch.from_numpy(dists)
-    dists = Variable(dists.cuda())
+        self.Encoder = Encoder(opt, config)
+        self.Decoder = Decoder(opt, config)
+        self.criterion = nn.CrossEntropyLoss()
+        self.labels = None
+        self.rel_logits = None
 
-    return adjs, dists
+    def forward(self, inputs):
+        input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
+        adjs, dists, subj_poses, obj_poses, bg_list, ed_list, subj_type_ids, obj_type_ids = inputs  # unpack
+
+        self.labels = label_ids
+
+        # Encoder
+        seq_outputs = self.Encoder(input_ids, input_masks, segment_ids)[0]
+
+        self.rel_logits, seq_h_out = self.Decoder(seq_outputs, subj_poses, obj_poses, adjs)
+        rel_loss = self.cal_rel_loss(self.rel_logits, label_ids)
+
+        return rel_loss, seq_h_out
+
+    def cal_rel_loss(self, logits, labels):
+        loss = self.criterion(logits, labels)
+        return loss
+
+    def predict(self):
+        probs = F.softmax(self.rel_logits, 1).data.cpu().numpy().tolist()
+        predictions = np.argmax(self.rel_logits.data.cpu().numpy(), axis=1).tolist()
+        return predictions, probs
+
+    def get_labels(self):
+        # lazy transform to list
+        self.labels = self.labels.cpu().numpy().tolist()
+        return self.labels
 
 
 def get_sinusoid_encoding_table(n_position, d_model):
