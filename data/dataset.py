@@ -54,8 +54,6 @@ class InputExample(object):
         """
         self.guid = single_data["id"]
         self.words = single_data["token"]
-        if opt['lower']:
-            self.words = [t.lower() for t in self.words]
         self.label = single_data["relation"]
         self.pos = single_data['stanford_pos']
         self.ner = single_data['stanford_ner']
@@ -99,6 +97,11 @@ def read_examples_from_file(opt, data_dir, mode):
     with open(file_path, encoding="utf-8") as f:
         all_data = json.load(f)
         for single_data in all_data:
+            for i, t in enumerate(single_data["token"]):
+                if "LRB" in t:
+                    single_data["token"][i] = '“'
+                elif "RRB" in t:
+                    single_data["token"][i] = '”'
             examples.append(InputExample(opt, single_data))
     return examples
 
@@ -366,6 +369,7 @@ def convert_examples_to_features(opt,
         if ex_index < 5:
             logger.info("*** Example ***")
             logger.info("guid: %s", example.guid)
+            logger.info("Label Id: {}".format(label_id))
             logger.info("tokens: %s", " ".join([str(x) for x in tokens]))
             logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
             logger.info("input_mask: %s", " ".join([str(x) for x in input_mask]))
@@ -406,15 +410,15 @@ def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, maxlen, deprel
                         only_child=False, self_loop=True, deprel_edge=False):
     tree, dist = head_to_tree(head, words, l, prune, subj_pos, obj_pos)
     # adj 邻接边为边类型
-    adj = tree_to_adj(maxlen, tree, only_child, self_loop)
+    adj = tree_to_adj(maxlen, l, tree, only_child, self_loop)
 
     if deprel_edge:
         for i, h in enumerate(head):
             # 如果被剪枝了就跳过
-            if adj[h-1][i] == 0 :
+            if adj[h-1][i] == 0:
                 continue
             dep = deprels[i]
-            adj[h-1,i] = dep # 边的值设为deprel id
+            adj[h-1, i] = dep # 边的值设为deprel id
             if not only_child:
                 # 如果结点也连接了父节点，与父节点的边类型为 r-deprel id
                 adj[i, h-1] = dep + constant.DEPREL_COUNT
@@ -488,7 +492,7 @@ def collate_fn(data):
     input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
         adjs, dists, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
         [list() for _ in range(16)]
-    data.sort(key=lambda x: len(x.bg_list), reverse=True)
+    # data.sort(key=lambda x: len(x.bg_list), reverse=True)
     for item in data:
         input_ids.append(item.input_ids)
         input_masks.append(item.input_mask)

@@ -170,11 +170,11 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
     return root, dist
 
 
-def tree_to_adj(sent_len, tree, only_child=False, self_loop=True):
+def tree_to_adj(max_len, sent_len, tree, only_child=False, self_loop=True):
     """
     Convert a tree object to an (numpy) adjacency matrix.
     """
-    ret = np.zeros((sent_len, sent_len), dtype=np.float32)
+    ret = np.zeros((max_len, max_len), dtype=np.float32)
 
     queue = [tree]
     idx = []
@@ -192,6 +192,8 @@ def tree_to_adj(sent_len, tree, only_child=False, self_loop=True):
 
     if self_loop:
         for i in idx:
+            if i >= sent_len:
+                continue
             ret[i, i] = 1
 
     return ret

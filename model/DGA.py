@@ -7,10 +7,9 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
-from utils import constant, torch_utils
-from model.tree import Tree, head_to_tree, tree_to_adj
+from utils import constant
 
-from model.bert import BertConfig, BertForTokenClassification, BertTokenizer, BertModel
+from model.bert import BertModel
 
 MAX_SEQ_LEN = 100
 
@@ -223,7 +222,9 @@ class Decoder(nn.Module):
 
     def forward(self, seq_outputs, subj_pos, obj_pos, adj):
         # pooling
-        subj_mask, obj_mask = subj_pos.eq(0).eq(0).unsqueeze(2), obj_pos.eq(0).eq(0).unsqueeze(2)  # invert mask
+        pos_indicator = int(self.opt["max_seq_length"])
+        subj_mask = subj_pos.eq(pos_indicator).eq(0).unsqueeze(2)
+        obj_mask = obj_pos.eq(pos_indicator).eq(0).unsqueeze(2)  # invert mask
         if self.opt["deprel_edge"]:
             adj_tmp = adj.eq(0).eq(0).long()
             pool_mask = (adj_tmp.sum(2) + adj_tmp.sum(1)).eq(0).unsqueeze(2)

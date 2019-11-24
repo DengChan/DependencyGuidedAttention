@@ -3,38 +3,34 @@ Train a model on TACRED.
 """
 
 import os
-import sys
-from datetime import datetime
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 import time
 import numpy as np
 import random
 import argparse
-from shutil import copyfile
 import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tqdm import trange, tqdm
 
 from model.trainer import GCNTrainer
 from model.bert import BertConfig, BertTokenizer
-from model.bert import AdamW, get_linear_schedule_with_warmup
 from utils import torch_utils, scorer, constant, helper
-from utils.vocab import Vocab
 from data.dataset import RelationDataset, collate_fn
 
 from tensorboardX import SummaryWriter
 from torch.nn import CrossEntropyLoss
 
-import os
 import logging
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--model_name_or_path", default="./pretrained/bert-base-uncased-pytorch_model.bin",
+parser.add_argument("--model_name_or_path", default="",
                     type=str, help="Path to pre-trained model")
-parser.add_argument("--config_name", default="./pretrained/bert-base-uncased-config.json", type=str,
+parser.add_argument("--config_name", default="", type=str,
                     help="Pretrained config name or path if not the same as model_name")
-parser.add_argument("--tokenizer_name", default="./pretrained/bert-base-uncased-vocab.txt", type=str,
+parser.add_argument("--tokenizer_name", default="", type=str,
                         help="Pretrained tokenizer name or path if not the same as model_name")
 parser.add_argument("--cache_dir", default="", type=str,
                     help="Where do you want to store the pre-trained models downloaded from s3")
@@ -64,7 +60,6 @@ parser.add_argument('--dep_layers', type=int, default=0, help='Num of Dependency
 
 parser.add_argument('--word_dropout', type=float, default=0.04, help='The rate at which randomly set a word to UNK.')
 parser.add_argument('--topn', type=int, default=7000, help='Only finetune top N word embeddings.')
-parser.add_argument('--lower', dest='lower', action='store_true', help='Lowercase all words.')
 parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
 
 
@@ -76,12 +71,12 @@ parser.add_argument('--first_subword_ner', type=bool, default=False,
                     help="only tag first subword ner, left subword is masked")
 parser.add_argument('--subword_to_children', type=bool, default=True,
                     help="treat subword to first subword's child in dep tress")
-parser.add_argument('--only_child', type=bool, default=True, help="whether use double direction edge.")
+parser.add_argument('--only_child', type=bool, default=False, help="whether use double direction edge.")
 parser.add_argument('--deprel_edge', type=bool, default=False, help="whether use deprel info on edge")
 parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
 
 
-parser.add_argument('--conv_l2', type=float, default=1e-5, help='L2-weight decay on conv layers only.')
+parser.add_argument('--conv_l2', type=float, default=0.0, help='L2-weight decay on conv layers only.')
 parser.add_argument('--pooling', choices=['max', 'avg', 'sum'], default='max', help='Pooling function type. Default max.')
 parser.add_argument('--pooling_l2', type=float, default=0.0, help='L2-penalty for all pooling output.')
 parser.add_argument('--no_adj', dest='no_adj', action='store_true', help="Zero out adjacency matrix for ablation.")
@@ -89,18 +84,14 @@ parser.add_argument('--no_adj', dest='no_adj', action='store_true', help="Zero o
 parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
                     help="Number of updates steps to accumulate before performing a backward/update pass.")
 
-parser.add_argument('--lr', type=float, default=0.01, help='Applies to sgd and adagrad.')
-parser.add_argument('--lr_decay', type=float, default=0.98, help='Learning rate decay rate.')
+parser.add_argument('--lr', type=float, default=0.00002, help='Applies to sgd and adagrad.')
 parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight decay if we apply some.")
 
-parser.add_argument('--decay_epoch', type=int, default=5, help='Decay learning rate after this epoch.')
-parser.add_argument('--optim', choices=['sgd', 'adagrad', 'adam', 'adamax', 'adadelta'], default='adagrad',
-                    help='Optimizer:sgd, adagrad, adam or adamax.')
 
 parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                     help="Epsilon for Adam optimizer.")
 parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
-parser.add_argument('--batch_size', type=int, default=16, help='Training batch size.')
+parser.add_argument('--batch_size', type=int, default=32, help='Training batch size.')
 parser.add_argument('--max_grad_norm', type=float, default=10.0, help='Gradient clipping.')
 
 parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps.")
@@ -115,7 +106,7 @@ parser.add_argument('--info', type=str, default='', help='Optional info for the 
 parser.add_argument('--seed', type=int, default=42)
 parser.add_argument('--cuda', type=bool, default=torch.cuda.is_available())
 parser.add_argument('--cpu', action='store_true', help='Ignore CUDA.')
-parser.add_argument("--fp16", action="store_true",
+parser.add_argument("--fp16", type=bool, default=False,
                     help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
 parser.add_argument("--fp16_opt_level", type=str, default="O1",
                     help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
@@ -146,15 +137,13 @@ label2id = constant.LABEL_TO_ID
 opt['num_class'] = len(label2id)
 opt["model_name_or_path"] = args.model_name_or_path
 # load vocab
-vocab_file = opt['vocab_dir'] + '/vocab.pkl'
-vocab = Vocab(vocab_file, load=True)
-opt['vocab_size'] = vocab.size
 
 # ner pad token id for unit extraction
 pad_token_label_id = CrossEntropyLoss().ignore_index
 
 # load config and tokenzier
 config = BertConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
+                                    num_labels=len(constant.LABEL_TO_ID),
                                     cache_dir=args.cache_dir if args.cache_dir else None)
 tokenizer = BertTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                                           do_lower_case=args.do_lower_case,
@@ -182,7 +171,6 @@ helper.ensure_dir(model_save_dir, verbose=True)
 
 # save config
 helper.save_config(opt, model_save_dir + '/config.json', verbose=True)
-vocab.save(model_save_dir + '/vocab.pkl')
 file_logger = helper.FileLogger(model_save_dir + '/' + opt['log'], header="# epoch\ttrain_loss\tdev_loss\tdev_score\tbest_dev_score")
 
 # print model info
@@ -203,7 +191,7 @@ else:
 id2label = dict([(v,k) for k,v in label2id.items()])
 dev_score_history = []
 current_lr = opt['lr']
-lr_change = True
+max_dev_scores = -1.0
 
 global_step = 0
 global_start_time = time.time()
@@ -221,7 +209,7 @@ for epoch in train_iterator:
         loss = trainer.update(batch, global_step)
         bs = len(batch[-3])
         all_train_count += bs
-        epoch_iterator.set_postfix(loss="{:.2f}".format(loss), mode="Train")
+        epoch_iterator.set_postfix(loss="{:.4f}".format(loss), mode="Train")
         train_loss += loss
         # train writer
         writer.add_scalar('loss/train', loss, global_step)
@@ -264,16 +252,16 @@ for epoch in train_iterator:
 
     # save
     model_file = model_save_dir + '/checkpoint_epoch_{}.pt'.format(epoch)
-    if epoch == 1 or dev_score > max(dev_score_history):
+    if epoch == 1 or dev_score > max_dev_scores:
+        max_dev_scores = dev_score
         trainer.save(model_save_dir + '/best_model.pt', epoch)
-        config.save_pretrained(model_file)
+        config.save_pretrained(model_save_dir)
         print("new best model saved.")
         file_logger.log("new best model saved at epoch {}: {:.2f}\t{:.2f}\t{:.2f}"\
             .format(epoch, dev_p*100, dev_r*100, dev_score*100))
     if epoch % opt['save_epoch'] == 0:
         trainer.save(model_file, epoch)
-        config.save_pretrained(model_file)
-        os.remove(model_file)
+        config.save_pretrained(model_save_dir)
 
 print("Training ended.")
 
