@@ -468,30 +468,29 @@ def heads_to_adj(heads, deprels,  maxlen, old_heads, subj_pos, obj_pos,
 
 class RelationDataset(Dataset):
     def __init__(self, opt, mode, tokenizer, pad_token_ner_label_id):
-        cached_features_file = os.path.join(opt["data_dir"], "cached_{}.data".format(mode))
-        if os.path.exists(cached_features_file):
-            logger.info("Loading features from cached file %s", cached_features_file)
-            self.features = torch.load(cached_features_file)
-        else:
-            logger.info("Creating features from dataset file at %s", opt["data_dir"])
-            examples = read_examples_from_file(opt, opt["data_dir"], mode)
-            self.features = convert_examples_to_features(opt, examples, opt["max_seq_length"], tokenizer,
-                                                         cls_token=tokenizer.cls_token,
-                                                         sep_token=tokenizer.sep_token,
-                                                         # pad on the left for xlnet
-                                                         pad_token=0,
-                                                         pad_token_label_id=pad_token_ner_label_id)
-            logger.info("Saving features into cached file %s", cached_features_file)
-            torch.save(self.features, cached_features_file)
+        self.opt = opt
+        self.tokenizer = tokenizer
+        self.pad_token_ner_label_id = pad_token_ner_label_id
+        self.examples = read_examples_from_file(opt, opt["data_dir"], mode)
 
     def __len__(self):
-        return len(self.features)
+        return len(self.examples)
 
     def __getitem__(self, item):
-        return self.features[item]
+        return self.examples[item]
+
+    def collate_fn(self, examples):
+        features = convert_examples_to_features(self.opt, examples,
+                                                self.opt["max_seq_length"],
+                                                self.tokenizer,
+                                                cls_token=self.tokenizer.cls_token,
+                                                sep_token=self.tokenizer.sep_token,
+                                                pad_token=0,
+                                                pad_token_label_id=self.pad_token_ner_label_id)
+        return convertData(features)
 
 
-def collate_fn(data):
+def convertData(data):
 
     input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
         adjs, dists, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
