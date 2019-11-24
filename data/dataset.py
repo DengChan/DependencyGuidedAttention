@@ -102,6 +102,11 @@ def read_examples_from_file(opt, data_dir, mode):
                     single_data["token"][i] = '“'
                 elif "RRB" in t:
                     single_data["token"][i] = '”'
+                elif "http:" in t or "https:" in t or "www" in t:
+                    single_data["token"][i] = "WEB-URL"
+                else:
+                    continue
+
             examples.append(InputExample(opt, single_data))
     return examples
 
@@ -179,7 +184,6 @@ def convert_examples_to_features(opt,
 
             idx += 1
 
-        assert len(example.head) == len(word_tokens_tmp)
 
         # 获取 head
         if opt["subword_to_children"]:
@@ -475,7 +479,7 @@ class RelationDataset(Dataset):
                                                          cls_token=tokenizer.cls_token,
                                                          sep_token=tokenizer.sep_token,
                                                          # pad on the left for xlnet
-                                                         pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
+                                                         pad_token=0,
                                                          pad_token_label_id=pad_token_ner_label_id)
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(self.features, cached_features_file)
@@ -493,7 +497,10 @@ def collate_fn(data):
         adjs, dists, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
         [list() for _ in range(16)]
     # data.sort(key=lambda x: len(x.bg_list), reverse=True)
+    max_len = 2
     for item in data:
+        seq_len = sum(item.input_mask)
+        max_len = max(seq_len, max_len)
         input_ids.append(item.input_ids)
         input_masks.append(item.input_mask)
         subword_masks.append(item.subword_mask)
@@ -509,18 +516,18 @@ def collate_fn(data):
         bg_list.append(item.bg_list)
         ed_list.append(item.ed_list)
 
-    input_ids = torch.tensor(input_ids, dtype=torch.long).cuda()
-    input_masks = torch.tensor(input_masks, dtype=torch.long).cuda()
-    subword_masks = torch.tensor(subword_masks, dtype=torch.long).cuda()
-    segment_ids = torch.tensor(segment_ids, dtype=torch.long).cuda()
+    input_ids = torch.tensor(np.array(input_ids, dtype=np.long)[:, :max_len]).cuda()
+    input_masks = torch.tensor(np.array(input_masks, dtype=np.long)[:, :max_len]).cuda()
+    subword_masks = torch.tensor(np.array(subword_masks, dtype=np.long)[:, :max_len]).cuda()
+    segment_ids = torch.tensor(np.array(segment_ids, dtype=np.long)[:, :max_len]).cuda()
+    ner_ids = torch.tensor(np.array(ner_ids, dtype=np.long)[:, :max_len]).cuda()
+    pos_ids = torch.tensor(np.array(pos_ids, dtype=np.long)[:, :max_len]).cuda()
+    deprel_ids = torch.tensor(np.array(deprel_ids, dtype=np.long)[:, :max_len]).cuda()
+    adjs = torch.tensor(np.array(adjs, dtype=np.float32)[:, :max_len, :max_len]).cuda()
+    dists = torch.tensor(np.array(dists, dtype=np.long)[:, :max_len]).cuda()
+    subj_poses = torch.tensor(np.array(subj_poses, dtype=np.long)[:, :max_len]).cuda()
+    obj_poses = torch.tensor(np.array(obj_poses, dtype=np.long)[:, :max_len]).cuda()
     label_ids = torch.tensor(label_ids, dtype=torch.long).cuda()
-    ner_ids = torch.tensor(ner_ids, dtype=torch.long).cuda()
-    pos_ids = torch.tensor(pos_ids, dtype=torch.long).cuda()
-    deprel_ids = torch.tensor(deprel_ids, dtype=torch.long).cuda()
-    adjs = torch.tensor(adjs, dtype=torch.float).cuda()
-    dists = torch.tensor(dists, dtype=torch.long).cuda()
-    subj_poses = torch.tensor(subj_poses, dtype=torch.long).cuda()
-    obj_poses = torch.tensor(obj_poses, dtype=torch.long).cuda()
 
     return input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
         adjs, dists, subj_poses, obj_poses, bg_list, ed_list, subj_type_ids, obj_type_ids
