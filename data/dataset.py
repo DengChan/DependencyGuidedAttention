@@ -31,10 +31,14 @@
 import os
 import numpy as np
 import json
+import pickle
 import torch
+
+from torch.utils.data import Dataset
+
 from utils import constant
 from model.tree import head_to_tree, tree_to_adj
-from torch.utils.data import TensorDataset, Dataset
+
 
 
 import logging
@@ -70,18 +74,15 @@ class InputExample(object):
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_mask, subword_mask, segment_ids, label_id,
-                 ner_ids, pos_ids, deprel_ids, adj, dists, subj_pos, obj_pos,
-                 bg_list, ed_list, subj_type, obj_type):
-        self.input_ids = input_ids
-        self.input_mask = input_mask
-        self.segment_ids = segment_ids
+    def __init__(self, tokens, length, subword_mask, label_id,
+                 ner_ids, pos_ids, deprel_ids, subj_pos, obj_pos,
+                 bg_list, ed_list, subj_type, obj_type, heads, old_heads):
+        self.tokens = tokens
+        self.length = length
         self.label_id = label_id
         self.ner_ids = ner_ids
         self.pos_ids = pos_ids
         self.deprel_ids = deprel_ids
-        self.adj = adj
-        self.dists = dists
         self.bg_list = bg_list
         self.ed_list = ed_list
         self.subword_mask = subword_mask
@@ -89,6 +90,8 @@ class InputFeatures(object):
         self.obj_type = obj_type
         self.subj_pos = subj_pos
         self.obj_pos = obj_pos
+        self.old_heads = old_heads
+        self.heads = heads
 
 
 def read_examples_from_file(opt, data_dir, mode):
@@ -113,19 +116,8 @@ def read_examples_from_file(opt, data_dir, mode):
 
 def convert_examples_to_features(opt,
                                  examples,
-                                 max_seq_length,
                                  tokenizer,
-                                 cls_token_at_end=False,
-                                 cls_token="[CLS]",
-                                 cls_token_segment_id=0,
-                                 sep_token="[SEP]",
-                                 sep_token_extra=False,
-                                 pad_on_left=False,
-                                 pad_token=0,
-                                 pad_token_segment_id=0,
-                                 pad_token_label_id=-1,
-                                 sequence_a_segment_id=0,
-                                 mask_padding_with_zero=True):
+                                 ):
     """ Loads a data file into a list of `InputBatch`s
         `cls_token_at_end` define the location of the CLS token:
             - False (Default, BERT/XLM pattern): [CLS] + A + [SEP] + B + [SEP]
@@ -184,7 +176,6 @@ def convert_examples_to_features(opt,
 
             idx += 1
 
-
         # 获取 head
         if opt["subword_to_children"]:
             # 如果单词被拆分，第一部分的头部为原来， 拆开的剩下的单词，以第一个单词为头
@@ -215,10 +206,10 @@ def convert_examples_to_features(opt,
                     new_h_s = 0
                     new_h_e = 0
                 else:
-                    new_h_s = old_index2new_index[h-1]+1
+                    new_h_s = old_index2new_index[h-1] + 1
                     new_h_e = old_end2new_end[h-1] + 1
                 new_h = list(range(new_h_s, new_h_e+1))
-                heads.extend([new_h]*len(word_tokens))
+                heads.extend([new_h] * len(word_tokens))
 
         # 处理subj_position 和 obj_position
         l = len(tokens)
@@ -229,178 +220,25 @@ def convert_examples_to_features(opt,
         subj_pos = get_positions(subj_start, subj_end, l)
         obj_pos = get_positions(obj_start, obj_end, l)
 
-        special_tokens_count = 3 if sep_token_extra else 2
-        # 生成邻接矩阵,
-        # max(l, max_seq_length-2) ： 如果 l> max_seq_length-2保证矩阵是完整的， 如果l < max_seq_length-2, 保证矩阵长度max_seq_length-2
-        # len(dists) == l 仍需要pad
-        if opt["subword_to_children"]:
-            adj, dists = inputs_to_tree_reps(heads, tokens, l, opt['prune_k'], subj_pos, obj_pos,
-                                             max(l, max_seq_length-special_tokens_count), deprel_ids,
-                                             opt["only_child"], opt["self_loop"], opt["deprel_edge"])
-        else:
-            adj, dists = heads_to_adj(heads, deprel_ids, max(l, max_seq_length-special_tokens_count), example.head,
-                                      subj_pos, obj_pos, old_index2new_index, old_end2new_end,
-                                      only_child=opt["only_child"], self_loop=opt["self_loop"],
-                                      deprel_edge=opt["deprel_edge"])
-
         # 实现Entity Mask
         if opt["entity_mask"]:
             tokens[subj_start:subj_end + 1] = ['SUBJ-' + example.subj_type] * (subj_end - subj_start + 1)
             tokens[obj_start:obj_end + 1] = ['OBJ-' + example.obj_type] * (obj_end - obj_start + 1)
 
-        # Account for [CLS] and [SEP] with "- 2" and with "- 3" for RoBERTa.
-        special_tokens_count = 3 if sep_token_extra else 2
-        # 截断大于最大长度的序列
-        if len(tokens) > max_seq_length - special_tokens_count:
-            tokens = tokens[:(max_seq_length - special_tokens_count)]
-            pos_ids = pos_ids[:(max_seq_length - special_tokens_count)]
-            ner_ids = ner_ids[:(max_seq_length - special_tokens_count)]
-            deprel_ids = deprel_ids[:(max_seq_length - special_tokens_count)]
-            subj_pos = subj_pos[:(max_seq_length - special_tokens_count)]
-            obj_pos = obj_pos[:(max_seq_length - special_tokens_count)]
-            dists = dists[:(max_seq_length - special_tokens_count)]
-            subword_mask = subword_mask[:(max_seq_length - special_tokens_count)]
+        seq_len = len(tokens)
+        assert len(subword_mask) == len(tokens)
+        assert len(ner_ids) == seq_len
+        assert len(pos_ids) == seq_len
+        assert len(subj_pos) == seq_len
+        assert len(obj_pos) == seq_len
+        assert len(heads) == seq_len
+        assert len(deprel_ids) == seq_len
+        assert len(old_end2new_end) == len(example.head)
 
-        # 截断大于最大长度的邻接矩阵元素
-        if adj.shape[0] > max_seq_length-special_tokens_count:
-            adj = adj[:max_seq_length-special_tokens_count, :max_seq_length-special_tokens_count]
+        features.append(InputFeatures(tokens, len(tokens), subword_mask, label_id, ner_ids, pos_ids, deprel_ids,
+                                      subj_pos, obj_pos, old_index2new_index, old_end2new_end,
+                                      example.subj_type, example.obj_type, heads, example.head))
 
-        # The convention in BERT is:
-        # (a) For sequence pairs:
-        #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
-        #  type_ids:   0   0  0    0    0     0       0   0   1  1  1  1   1   1
-        # (b) For single sequences:
-        #  tokens:   [CLS] the dog is hairy . [SEP]
-        #  type_ids:   0   0   0   0  0     0   0
-        #
-        # Where "type_ids" are used to indicate whether this is the first
-        # sequence or the second sequence. The embedding vectors for `type=0` and
-        # `type=1` were learned during pre-training and are added to the wordpiece
-        # embedding vector (and position vector). This is not *strictly* necessary
-        # since the [SEP] token unambiguously separates the sequences, but it makes
-        # it easier for the model to learn the concept of sequences.
-        #
-        # For classification tasks, the first vector (corresponding to [CLS]) is
-        # used as as the "sentence vector". Note that this only makes sense because
-        # the entire model is fine-tuned.
-        tokens += [sep_token]
-        ner_ids += [constant.PAD_ID]
-        pos_ids += [constant.PAD_ID]
-        deprel_ids += [constant.PAD_ID]
-        subj_pos += [subj_pos[-1] + 1]
-        obj_pos += [obj_pos[-1] + 1]
-        dists += [0]
-        subword_mask += [0]
-
-        if sep_token_extra:
-            # roberta uses an extra separator b/w pairs of sentences
-            tokens += [sep_token]
-            pos_ids += [constant.PAD_ID]
-            ner_ids += [constant.PAD_ID]
-            deprel_ids += [constant.PAD_ID]
-
-        segment_ids = [sequence_a_segment_id] * len(tokens)
-
-        if cls_token_at_end:
-            tokens += [cls_token]
-            ner_ids += [constant.PAD_ID]
-            segment_ids += [cls_token_segment_id]
-            pos_ids += [constant.PAD_ID]
-            deprel_ids += [constant.PAD_ID]
-            subj_pos += [subj_pos[0] - 1]
-            obj_pos += [obj_pos[0] - 1]
-            dists += [0]
-            subword_mask += [0]
-        else:
-            tokens = [cls_token] + tokens
-            ner_ids = [constant.PAD_ID] + ner_ids
-            pos_ids = [constant.PAD_ID] + pos_ids
-            deprel_ids = [constant.PAD_ID] + deprel_ids
-            subj_pos = [subj_pos[0]-1] + subj_pos
-            obj_pos = [obj_pos[0]-1] + obj_pos
-            dists = [0] + dists
-            segment_ids = [cls_token_segment_id] + segment_ids
-            subword_mask = [0] + subword_mask
-
-        input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
-        # The mask has 1 for real tokens and 0 for padding tokens. Only real
-        # tokens are attended to.
-        input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
-
-        # Zero-pad up to the sequence length.
-        padding_length = max_seq_length - len(input_ids)
-        if pad_on_left:
-            input_ids = ([pad_token] * padding_length) + input_ids
-            input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
-            segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
-            ner_ids = ([constant.PAD_ID] * padding_length) + ner_ids
-            pos_ids = ([constant.PAD_ID] * padding_length) + pos_ids
-            deprel_ids = ([constant.PAD_ID] * padding_length) + deprel_ids
-            dists = ([0] * padding_length) + dists
-            subword_mask = ([0] * padding_length) + subword_mask
-            for i in range(padding_length):
-                subj_pos = [subj_pos[0] - 1] + subj_pos
-                obj_pos = [obj_pos[0] - 1] + obj_pos
-
-        else:
-            input_ids += ([pad_token] * padding_length)
-            input_mask += ([0 if mask_padding_with_zero else 1] * padding_length)
-            segment_ids += ([pad_token_segment_id] * padding_length)
-            ner_ids += ([constant.PAD_ID] * padding_length)
-            pos_ids += ([constant.PAD_ID] * padding_length)
-            deprel_ids += ([constant.PAD_ID] * padding_length)
-            dists += ([0] * padding_length)
-            subword_mask += ([0] * padding_length)
-            for i in range(padding_length):
-                subj_pos += [subj_pos[-1] + 1]
-                obj_pos += [obj_pos[-1] + 1]
-
-        # 单独处理 adj
-        adj = np.pad(adj, ((1, 1), (1, 1)), 'constant', constant_values=(0.0, 0.0))
-
-        subj_pos = [p + max_seq_length for p in subj_pos]
-        obj_pos = [p + max_seq_length for p in obj_pos]
-
-        assert len(input_ids) == max_seq_length
-        assert len(input_mask) == max_seq_length
-        assert len(segment_ids) == max_seq_length
-        assert len(ner_ids) == max_seq_length
-        assert len(subj_pos) == max_seq_length
-        assert len(dists) == max_seq_length
-        assert adj.shape[0] == max_seq_length
-
-        if ex_index < 5:
-            logger.info("*** Example ***")
-            logger.info("guid: %s", example.guid)
-            logger.info("Label Id: {}".format(label_id))
-            logger.info("tokens: %s", " ".join([str(x) for x in tokens]))
-            logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
-            logger.info("input_mask: %s", " ".join([str(x) for x in input_mask]))
-            logger.info("segment_ids: %s", " ".join([str(x) for x in segment_ids]))
-            logger.info("subword_mask: %s", " ".join([str(x) for x in subword_mask]))
-            logger.info("ner_ids: %s", " ".join([str(x) for x in ner_ids]))
-            logger.info("subj_position: %s", " ".join([str(x) for x in subj_pos]))
-            logger.info("LCA distances: %s", " ".join([str(x) for x in dists]))
-            logger.info("Adj(front 10 node): {}".format(adj[:10, :10]))
-
-        features.append(
-                InputFeatures(input_ids=input_ids,
-                              input_mask=input_mask,
-                              subword_mask=subword_mask,
-                              segment_ids=segment_ids,
-                              label_id=label_id,
-                              ner_ids=ner_ids,
-                              pos_ids=pos_ids,
-                              deprel_ids=deprel_ids,
-                              adj=adj,
-                              dists=dists,
-                              subj_pos=subj_pos,
-                              obj_pos=obj_pos,
-                              bg_list=old_index2new_index,
-                              ed_list=old_end2new_end,
-                              subj_type=constant.SUBJ_NER_TO_ID[example.subj_type],
-                              obj_type=constant.OBJ_NER_TO_ID[example.obj_type]))
     return features
 
 
@@ -467,65 +305,221 @@ def heads_to_adj(heads, deprels,  maxlen, old_heads, subj_pos, obj_pos,
 
 
 class RelationDataset(Dataset):
-    def __init__(self, opt, mode, tokenizer, pad_token_ner_label_id):
+    def __init__(self, opt, mode, tokenizer):
         self.opt = opt
         self.tokenizer = tokenizer
-        self.pad_token_ner_label_id = pad_token_ner_label_id
-        self.examples = read_examples_from_file(opt, opt["data_dir"], mode)
+        self.output_examples = False
+        cached_features_file = os.path.join(opt["data_dir"], "cached_{}.data".format(mode))
+        if os.path.exists(cached_features_file):
+            logger.info("Loading features from cached file %s", cached_features_file)
+            with open(cached_features_file, 'rb') as f:
+                self.features = pickle.load(f)
+        else:
+            logger.info("Creating features from dataset file at %s", opt["data_dir"])
+            examples = read_examples_from_file(opt, opt["data_dir"], mode)
+            self.features = convert_examples_to_features(self.opt, examples, self.tokenizer)
+            with open(cached_features_file, 'wb') as f:
+                pickle.dump(self.features, f)
 
     def __len__(self):
-        return len(self.examples)
+        return len(self.features)
 
     def __getitem__(self, item):
-        return self.examples[item]
+        return self.features[item]
 
-    def collate_fn(self, examples):
-        features = convert_examples_to_features(self.opt, examples,
-                                                self.opt["max_seq_length"],
-                                                self.tokenizer,
-                                                cls_token=self.tokenizer.cls_token,
-                                                sep_token=self.tokenizer.sep_token,
-                                                pad_token=0,
-                                                pad_token_label_id=self.pad_token_ner_label_id)
-        return convertData(features)
+    def collate_fn(self, features):
+        batch_data = convertData(self.opt, features, self.tokenizer,
+                                 cls_token=self.tokenizer.cls_token,
+                                 sep_token=self.tokenizer.sep_token,
+                                 pad_token=0, output_examples=self.output_examples)
+        self.output_examples = False
+        return batch_data
 
 
-def convertData(data):
+def convertData(opt, features, tokenizer,
+                cls_token_at_end=False, cls_token="[CLS]", cls_token_segment_id=0,
+                sep_token="[SEP]", sep_token_extra=False,
+                pad_on_left=False, pad_token=0, pad_token_segment_id=0,
+                sequence_a_segment_id=0, mask_padding_with_zero=True,
+                output_examples=False):
+
+    lengths = [f.length for f in features]
+    batch_max_len = max(lengths)
+    feature_cnt = 0
 
     input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
-        adjs, dists, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
+    adjs, dists, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
         [list() for _ in range(16)]
-    # data.sort(key=lambda x: len(x.bg_list), reverse=True)
-    max_len = 2
-    for item in data:
-        seq_len = sum(item.input_mask)
-        max_len = max(seq_len, max_len)
-        input_ids.append(item.input_ids)
-        input_masks.append(item.input_mask)
-        subword_masks.append(item.subword_mask)
-        segment_ids.append(item.segment_ids)
-        label_ids.append(item.label_id)
-        ner_ids.append(item.ner_ids)
-        pos_ids.append(item.pos_ids)
-        deprel_ids.append(item.deprel_ids)
-        adjs.append(item.adj)
-        dists.append(item.dists)
-        subj_poses.append(item.subj_pos)
-        obj_poses.append(item.obj_pos)
-        bg_list.append(item.bg_list)
-        ed_list.append(item.ed_list)
 
-    input_ids = torch.tensor(np.array(input_ids, dtype=np.long)[:, :max_len]).cuda()
-    input_masks = torch.tensor(np.array(input_masks, dtype=np.long)[:, :max_len]).cuda()
-    subword_masks = torch.tensor(np.array(subword_masks, dtype=np.long)[:, :max_len]).cuda()
-    segment_ids = torch.tensor(np.array(segment_ids, dtype=np.long)[:, :max_len]).cuda()
-    ner_ids = torch.tensor(np.array(ner_ids, dtype=np.long)[:, :max_len]).cuda()
-    pos_ids = torch.tensor(np.array(pos_ids, dtype=np.long)[:, :max_len]).cuda()
-    deprel_ids = torch.tensor(np.array(deprel_ids, dtype=np.long)[:, :max_len]).cuda()
-    adjs = torch.tensor(np.array(adjs, dtype=np.float32)[:, :max_len, :max_len]).cuda()
-    dists = torch.tensor(np.array(dists, dtype=np.long)[:, :max_len]).cuda()
-    subj_poses = torch.tensor(np.array(subj_poses, dtype=np.long)[:, :max_len]).cuda()
-    obj_poses = torch.tensor(np.array(obj_poses, dtype=np.long)[:, :max_len]).cuda()
+    for feature in features:
+        # 生成邻接矩阵,
+        # max(l, max_seq_length-2) ： 如果 l> max_seq_length-2保证矩阵是完整的， 如果l < max_seq_length-2, 保证矩阵长度max_seq_length-2
+        # len(dists) == l 仍需要pad
+        if opt["subword_to_children"]:
+            adj, dists = inputs_to_tree_reps(feature.heads, feature.tokens, feature.length,
+                                             opt['prune_k'], feature.subj_pos, feature.obj_pos,
+                                             batch_max_len, feature.deprel_ids,
+                                             opt["only_child"], opt["self_loop"], opt["deprel_edge"])
+        else:
+            adj, dists = heads_to_adj(feature.heads, feature.deprel_ids, batch_max_len,
+                                      feature.old_heads,
+                                      feature.subj_pos, feature.obj_pos,
+                                      feature.bg_list, feature.ed_list,
+                                      only_child=opt["only_child"], self_loop=opt["self_loop"],
+                                      deprel_edge=opt["deprel_edge"])
+
+        # The convention in BERT is:
+        # (a) For sequence pairs:
+        #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
+        #  type_ids:   0   0  0    0    0     0       0   0   1  1  1  1   1   1
+        # (b) For single sequences:
+        #  tokens:   [CLS] the dog is hairy . [SEP]
+        #  type_ids:   0   0   0   0  0     0   0
+        #
+        # Where "type_ids" are used to indicate whether this is the first
+        # sequence or the second sequence. The embedding vectors for `type=0` and
+        # `type=1` were learned during pre-training and are added to the wordpiece
+        # embedding vector (and position vector). This is not *strictly* necessary
+        # since the [SEP] token unambiguously separates the sequences, but it makes
+        # it easier for the model to learn the concept of sequences.
+        #
+        # For classification tasks, the first vector (corresponding to [CLS]) is
+        # used as as the "sentence vector". Note that this only makes sense because
+        # the entire model is fine-tuned.
+        feature.tokens += [sep_token]
+        feature.ner_ids += [constant.PAD_ID]
+        feature.pos_ids += [constant.PAD_ID]
+        feature.deprel_ids += [constant.PAD_ID]
+        feature.subj_pos += [feature.subj_pos[-1] + 1]
+        feature.obj_pos += [feature.obj_pos[-1] + 1]
+        feature.subword_mask += [0]
+        dists += [0]
+
+        if sep_token_extra:
+            # roberta uses an extra separator b/w pairs of sentences
+            feature.tokens += [sep_token]
+            feature.pos_ids += [constant.PAD_ID]
+            feature.ner_ids += [constant.PAD_ID]
+            feature.deprel_ids += [constant.PAD_ID]
+
+        segment_ids = [sequence_a_segment_id] * len(feature.tokens)
+
+        if cls_token_at_end:
+            feature.tokens += [cls_token]
+            feature.ner_ids += [constant.PAD_ID]
+            feature.pos_ids += [constant.PAD_ID]
+            feature.deprel_ids += [constant.PAD_ID]
+            feature.subj_pos += [feature.subj_pos[0] - 1]
+            feature.obj_pos += [feature.obj_pos[0] - 1]
+            feature.subword_mask += [0]
+
+            dists += [0]
+            segment_ids += [cls_token_segment_id]
+        else:
+            feature.tokens = [cls_token] + feature.tokens
+            feature.ner_ids = [constant.PAD_ID] + feature.ner_ids
+            feature.pos_ids = [constant.PAD_ID] + feature.pos_ids
+            feature.deprel_ids = [constant.PAD_ID] + feature.deprel_ids
+            feature.subj_pos = [feature.subj_pos[0] - 1] + feature.subj_pos
+            feature.obj_pos = [feature.obj_pos[0] - 1] + feature.obj_pos
+            feature.subword_mask = [0] + feature.subword_mask
+
+            dists = [0] + dists
+            segment_ids = [cls_token_segment_id] + segment_ids
+
+        input_ids = tokenizer.convert_tokens_to_ids(feature.tokens)
+        # The mask has 1 for real tokens and 0 for padding tokens. Only real
+        # tokens are attended to.
+        input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
+
+        # Zero-pad up to the sequence length.
+        padding_length = batch_max_len - len(input_ids)
+        if pad_on_left:
+            input_ids = ([pad_token] * padding_length) + input_ids
+            input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
+            segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
+            dists = ([0] * padding_length) + dists
+
+            feature.ner_ids = ([constant.PAD_ID] * padding_length) + feature.ner_ids
+            feature.pos_ids = ([constant.PAD_ID] * padding_length) + feature.pos_ids
+            feature.deprel_ids = ([constant.PAD_ID] * padding_length) + feature.deprel_ids
+            feature.subword_mask = ([0] * padding_length) + feature.subword_mask
+
+            for i in range(padding_length):
+                feature.subj_pos = [feature.subj_pos[0] - 1] + feature.subj_pos
+                feature.obj_pos = [feature.obj_pos[0] - 1] + feature.obj_pos
+
+        else:
+            input_ids += ([pad_token] * padding_length)
+            input_mask += ([0 if mask_padding_with_zero else 1] * padding_length)
+            segment_ids += ([pad_token_segment_id] * padding_length)
+            dists += ([0] * padding_length)
+
+            feature.ner_ids += ([constant.PAD_ID] * padding_length)
+            feature.pos_ids += ([constant.PAD_ID] * padding_length)
+            feature.deprel_ids += ([constant.PAD_ID] * padding_length)
+            feature.subword_mask += ([0] * padding_length)
+            for i in range(padding_length):
+                feature.subj_pos += [feature.subj_pos[-1] + 1]
+                feature.obj_pos += [feature.obj_pos[-1] + 1]
+
+        # 单独处理 adj
+        adj = np.pad(adj, ((1, 1), (1, 1)), 'constant', constant_values=(0.0, 0.0))
+
+        feature.subj_pos = [p + opt["max_sequence_len"] for p in feature.subj_pos]
+        feature.obj_pos = [p + opt["max_sequence_leng"] for p in feature.obj_pos]
+
+        assert len(input_ids) == batch_max_len
+        assert len(input_mask) == batch_max_len
+        assert len(segment_ids) == batch_max_len
+        assert len(dists) == batch_max_len
+        assert adj.shape[0] == batch_max_len
+        assert len(feature.ner_ids) == batch_max_len
+        assert len(feature.obj_pos) == batch_max_len
+
+        if output_examples and feature_cnt < 5:
+            logger.info("*** Example ***")
+            logger.info("Label Id: {}".format(feature.label_id))
+            logger.info("tokens: %s", " ".join([str(x) for x in feature.tokens]))
+            logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
+            logger.info("input_mask: %s", " ".join([str(x) for x in input_mask]))
+            logger.info("segment_ids: %s", " ".join([str(x) for x in segment_ids]))
+            logger.info("subword_mask: %s", " ".join([str(x) for x in feature.subword_mask]))
+            logger.info("ner_ids: %s", " ".join([str(x) for x in feature.ner_ids]))
+            logger.info("subj_position: %s", " ".join([str(x) for x in feature.subj_pos]))
+            logger.info("LCA distances: %s", " ".join([str(x) for x in dists]))
+            logger.info("Adj(front 10 node): {}".format(adj[:10, :10]))
+            feature_cnt += 1
+
+        input_ids.append(input_ids)
+        input_masks.append(input_mask)
+        segment_ids.append(segment_ids)
+        adjs.append(adj)
+        dists.append(dists)
+
+        subword_masks.append(feature.subword_mask)
+        label_ids.append(feature.label_id)
+        ner_ids.append(feature.ner_ids)
+        pos_ids.append(feature.pos_ids)
+        deprel_ids.append(feature.deprel_ids)
+        subj_poses.append(feature.subj_pos)
+        obj_poses.append(feature.obj_pos)
+        bg_list.append(feature.bg_list)
+        ed_list.append(feature.ed_list)
+        subj_type_ids.append(constant.SUBJ_NER_TO_ID[feature.subj_type])
+        obj_type_ids.append(constant.OBJ_NER_TO_ID[feature.obj_type])
+
+    input_ids = torch.tensor(input_ids, dtype=torch.long).cuda()
+    input_masks = torch.tensor(input_masks, dtype=torch.long).cuda()
+    subword_masks = torch.tensor(subword_masks, dtype=torch.long).cuda()
+    segment_ids = torch.tensor(segment_ids, dtype=torch.long).cuda()
+    ner_ids = torch.tensor(ner_ids, dtype=torch.long).cuda()
+    pos_ids = torch.tensor(pos_ids, dtype=torch.long).cuda()
+    deprel_ids = torch.tensor(deprel_ids, dtype=torch.long).cuda()
+    adjs = torch.tensor(adjs, dtype=torch.long).cuda()
+    dists = torch.tensor(dists, dtype=torch.long).cuda()
+    subj_poses = torch.tensor(subj_poses, dtype=torch.long).cuda()
+    obj_poses = torch.tensor(obj_poses, dtype=torch.long).cuda()
     label_ids = torch.tensor(label_ids, dtype=torch.long).cuda()
 
     return input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \

@@ -16,7 +16,7 @@ from tqdm import trange, tqdm
 from model.trainer import GCNTrainer
 from model.bert import BertConfig, BertTokenizer
 from utils import torch_utils, scorer, constant, helper
-from data.dataset import RelationDataset, collate_fn
+from data.dataset import RelationDataset
 
 from tensorboardX import SummaryWriter
 from torch.nn import CrossEntropyLoss
@@ -34,14 +34,12 @@ parser.add_argument("--tokenizer_name", default="", type=str,
                         help="Pretrained tokenizer name or path if not the same as model_name")
 parser.add_argument("--cache_dir", default="", type=str,
                     help="Where do you want to store the pre-trained models downloaded from s3")
-parser.add_argument("--max_seq_length", default=128, type=int,
+parser.add_argument("--max_seq_length", default=300, type=int,
                     help="The maximum total input sequence length after tokenization. Sequences longer "
                          "than this will be truncated, sequences shorter will be padded.")
 
 parser.add_argument('--data_dir', type=str, default='dataset/')
-parser.add_argument('--vocab_dir', type=str, default='dataset/vocab')
 # Input
-parser.add_argument('--emb_dim', type=int, default=300, help='Word embedding dimension.')
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
 parser.add_argument('--dist_dim', type=int, default=56, help='LCA distance embedding dimension.')
@@ -59,7 +57,6 @@ parser.add_argument('--dep_layers', type=int, default=0, help='Num of Dependency
 
 
 parser.add_argument('--word_dropout', type=float, default=0.04, help='The rate at which randomly set a word to UNK.')
-parser.add_argument('--topn', type=int, default=7000, help='Only finetune top N word embeddings.')
 parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
 
 
@@ -152,17 +149,17 @@ tokenizer = BertTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_
 # load data
 print("Loading data from {} with batch size {}...".format(opt['data_dir'], opt['batch_size']))
 
-train_dataset = RelationDataset(opt, mode="train", tokenizer=tokenizer, pad_token_ner_label_id=pad_token_label_id)
+train_dataset = RelationDataset(opt, mode="train", tokenizer=tokenizer)
 train_sampler = RandomSampler(train_dataset)
 train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.batch_size,
-                              collate_fn=collate_fn)
+                              collate_fn=train_dataset.collate_fn)
 t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_epoch
 opt["t_total"] = t_total
 
-dev_dataset = RelationDataset(opt, mode="dev", tokenizer=tokenizer, pad_token_ner_label_id=pad_token_label_id)
+dev_dataset = RelationDataset(opt, mode="dev", tokenizer=tokenizer)
 dev_sampler = SequentialSampler(dev_dataset)
 dev_dataloader = DataLoader(dev_dataset, sampler=dev_sampler, batch_size=args.batch_size,
-                            collate_fn=collate_fn)
+                            collate_fn=dev_dataset.collate_fn)
 
 model_id = opt['id'] if len(opt['id']) > 1 else '0' + opt['id']
 model_save_dir = opt['save_dir'] + '/' + model_id
