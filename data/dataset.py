@@ -32,6 +32,7 @@ import os
 import numpy as np
 import json
 import pickle
+import re
 import torch
 
 from torch.utils.data import Dataset
@@ -105,10 +106,18 @@ def read_examples_from_file(opt, data_dir, mode):
                     single_data["token"][i] = '“'
                 elif "RRB" in t:
                     single_data["token"][i] = '”'
-                elif "http:" in t or "https:" in t or "www" in t:
-                    single_data["token"][i] = "WEB-URL"
-                else:
-                    continue
+                # if len(t) > 7:
+                #     if "http:" in t or "https:" in t or "www" in t or ".org/" in t or \
+                #             (".com" in t and "@" not in t) or (".ss" in t and "@" not in t):
+                #         single_data["token"][i] = "WEB-URL"
+                #     elif ("com" in t and "@" in t) or (".net" in t and "@" in t) or (".ss" in t and "@" in t):
+                #         single_data["token"][i] = "E-MAIL"
+                #     elif re.match(r'(([A-Z]*[0-9][A-Z]*)+[-])+', t) is not None:
+                #         single_data["token"][i] = "E-CODE"
+                #     elif re.match(r'(,*[0-9])+', t) is not None or re.match(r'([A-Za-z]*[0-9][A-Za-z]*){5,}', t) is not None:
+                #         single_data["token"][i] = "E-NUM"
+                #     else:
+                #         continue
 
             examples.append(InputExample(opt, single_data))
     return examples
@@ -126,6 +135,7 @@ def convert_examples_to_features(opt,
     """
 
     features = []
+    max_len = 0
     for (ex_index, example) in enumerate(examples):
         if ex_index % 10000 == 0:
             logger.info("Writing example %d of %d", ex_index, len(examples))
@@ -145,7 +155,7 @@ def convert_examples_to_features(opt,
             # 更新old2new的映射
             old_index2new_index.append(len(tokens))
             # 获取分词
-            word_tokens = tokenizer.tokenize(word)
+            word_tokens = tokenizeWord(word, tokenizer)
             word_tokens_tmp.append(word_tokens)
             tokens.extend(word_tokens)
             # 更新old_end2new_end的映射
@@ -175,7 +185,7 @@ def convert_examples_to_features(opt,
             subword_mask.extend([1]+[0] * (len(word_tokens) - 1)) # 第一个subword 为1, 其余为0
 
             idx += 1
-
+        max_len = max(len(tokens), max_len)
         # 获取 head
         if opt["subword_to_children"]:
             # 如果单词被拆分，第一部分的头部为原来， 拆开的剩下的单词，以第一个单词为头
@@ -238,7 +248,7 @@ def convert_examples_to_features(opt,
         features.append(InputFeatures(tokens, len(tokens), subword_mask, label_id, ner_ids, pos_ids, deprel_ids,
                                       subj_pos, obj_pos, old_index2new_index, old_end2new_end,
                                       example.subj_type, example.obj_type, heads, example.head))
-
+    print(" MAX LEN IS : {}".format(max_len))
     return features
 
 
@@ -347,8 +357,8 @@ def convertData(opt, features, tokenizer,
     batch_max_len = max(lengths)
     feature_cnt = 0
 
-    input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
-    adjs, dists, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
+    input_ids_lst, input_masks, subword_masks, segment_ids_lst, label_ids, ner_ids, pos_ids, deprel_ids, \
+    adjs, dists_lst, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
         [list() for _ in range(16)]
 
     for feature in features:
@@ -433,7 +443,7 @@ def convertData(opt, features, tokenizer,
         input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
 
         # Zero-pad up to the sequence length.
-        padding_length = batch_max_len - len(input_ids)
+        padding_length = batch_max_len + 2 - len(input_ids)
         if pad_on_left:
             input_ids = ([pad_token] * padding_length) + input_ids
             input_mask = ([0 if mask_padding_with_zero else 1] * padding_length) + input_mask
@@ -466,16 +476,22 @@ def convertData(opt, features, tokenizer,
         # 单独处理 adj
         adj = np.pad(adj, ((1, 1), (1, 1)), 'constant', constant_values=(0.0, 0.0))
 
-        feature.subj_pos = [p + opt["max_sequence_len"] for p in feature.subj_pos]
-        feature.obj_pos = [p + opt["max_sequence_leng"] for p in feature.obj_pos]
+        feature.subj_pos = [p + opt["max_seq_length"] for p in feature.subj_pos]
+        feature.obj_pos = [p + opt["max_seq_length"] for p in feature.obj_pos]
 
-        assert len(input_ids) == batch_max_len
-        assert len(input_mask) == batch_max_len
-        assert len(segment_ids) == batch_max_len
-        assert len(dists) == batch_max_len
-        assert adj.shape[0] == batch_max_len
-        assert len(feature.ner_ids) == batch_max_len
-        assert len(feature.obj_pos) == batch_max_len
+        assert len(input_ids) == batch_max_len + 2
+        assert len(input_mask) == batch_max_len + 2
+        assert len(segment_ids) == batch_max_len + 2
+        assert len(dists) == batch_max_len + 2
+        assert adj.shape[0] == batch_max_len + 2
+
+        assert len(feature.ner_ids) == batch_max_len + 2
+        assert len(feature.pos_ids) == batch_max_len + 2
+        assert len(feature.obj_pos) == batch_max_len + 2
+        assert len(feature.deprel_ids) == batch_max_len + 2
+        assert len(feature.subword_mask) == batch_max_len + 2
+        assert len(feature.subj_pos) == batch_max_len + 2
+        assert len(feature.obj_pos) == batch_max_len + 2
 
         if output_examples and feature_cnt < 5:
             logger.info("*** Example ***")
@@ -491,11 +507,11 @@ def convertData(opt, features, tokenizer,
             logger.info("Adj(front 10 node): {}".format(adj[:10, :10]))
             feature_cnt += 1
 
-        input_ids.append(input_ids)
+        input_ids_lst.append(input_ids)
         input_masks.append(input_mask)
-        segment_ids.append(segment_ids)
+        segment_ids_lst.append(segment_ids)
         adjs.append(adj)
-        dists.append(dists)
+        dists_lst.append(dists)
 
         subword_masks.append(feature.subword_mask)
         label_ids.append(feature.label_id)
@@ -509,18 +525,38 @@ def convertData(opt, features, tokenizer,
         subj_type_ids.append(constant.SUBJ_NER_TO_ID[feature.subj_type])
         obj_type_ids.append(constant.OBJ_NER_TO_ID[feature.obj_type])
 
-    input_ids = torch.tensor(input_ids, dtype=torch.long).cuda()
+    input_ids_lst = torch.tensor(input_ids_lst, dtype=torch.long).cuda()
+    dists_lst = torch.tensor(dists_lst, dtype=torch.long).cuda()
+    segment_ids_lst = torch.tensor(segment_ids_lst, dtype=torch.long).cuda()
+
     input_masks = torch.tensor(input_masks, dtype=torch.long).cuda()
     subword_masks = torch.tensor(subword_masks, dtype=torch.long).cuda()
-    segment_ids = torch.tensor(segment_ids, dtype=torch.long).cuda()
     ner_ids = torch.tensor(ner_ids, dtype=torch.long).cuda()
     pos_ids = torch.tensor(pos_ids, dtype=torch.long).cuda()
     deprel_ids = torch.tensor(deprel_ids, dtype=torch.long).cuda()
-    adjs = torch.tensor(adjs, dtype=torch.long).cuda()
-    dists = torch.tensor(dists, dtype=torch.long).cuda()
+    adjs = torch.tensor(adjs, dtype=torch.float).cuda()
     subj_poses = torch.tensor(subj_poses, dtype=torch.long).cuda()
     obj_poses = torch.tensor(obj_poses, dtype=torch.long).cuda()
     label_ids = torch.tensor(label_ids, dtype=torch.long).cuda()
 
-    return input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
-        adjs, dists, subj_poses, obj_poses, bg_list, ed_list, subj_type_ids, obj_type_ids
+    return input_ids_lst, input_masks, subword_masks, segment_ids_lst, label_ids, ner_ids, pos_ids, deprel_ids, \
+        adjs, dists_lst, subj_poses, obj_poses, bg_list, ed_list, subj_type_ids, obj_type_ids
+
+
+def tokenizeWord(word, tokenizer):
+    if word in constant.ADDITIONAL_WORDS:
+        return [word]
+    elif re.match(r'[=+*-.#$@!~_—]+$', word) is not None:
+        return [word[0]]
+
+    word_tokens = tokenizer.tokenize(word)
+    # if 5 < len(word_tokens) <= 7:
+    #     print(word)
+    #     print(word_tokens)
+    #     print("================================================")
+    if len(word_tokens) >= 4:
+        word_tokens = [word]
+    return word_tokens
+
+
+

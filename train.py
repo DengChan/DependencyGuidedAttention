@@ -3,9 +3,10 @@ Train a model on TACRED.
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import time
+import pickle
 import numpy as np
 import random
 import argparse
@@ -145,6 +146,7 @@ config = BertConfig.from_pretrained(args.config_name if args.config_name else ar
 tokenizer = BertTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
                                           do_lower_case=args.do_lower_case,
                                           cache_dir=args.cache_dir if args.cache_dir else None)
+
 
 # load data
 print("Loading data from {} with batch size {}...".format(opt['data_dir'], opt['batch_size']))
