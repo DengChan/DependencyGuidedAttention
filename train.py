@@ -25,6 +25,8 @@ from torch.nn import CrossEntropyLoss
 import logging
 from utils import golVars
 
+logger = logging.getLogger(__name__)
+
 golVars._init()
 
 
@@ -85,7 +87,7 @@ parser.add_argument('--no_adj', dest='no_adj', action='store_true', help="Zero o
 parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
                     help="Number of updates steps to accumulate before performing a backward/update pass.")
 
-parser.add_argument('--lr', type=float, default=0.00002, help='Applies to sgd and adagrad.')
+parser.add_argument('--lr', type=float, default=0.000005, help='Applies to sgd and adagrad.')
 parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight decay if we apply some.")
 
 
@@ -172,13 +174,13 @@ train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=a
 
 dev_dataset = RelationDataset(opt, mode="dev", tokenizer=tokenizer)
 dev_sampler = SequentialSampler(dev_dataset)
-dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size,
+dev_dataloader = DataLoader(dev_dataset, batch_size=int(args.batch_size/2),
                             collate_fn=collate_fn, shuffle=False)
 
 t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_epoch
 opt["t_total"] = t_total
 # save config
-helper.save_config(opt, model_save_dir + '/config.json', verbose=True)
+helper.save_config(opt, model_save_dir + '/opt_config.json', verbose=True)
 file_logger = helper.FileLogger(model_save_dir + '/' + opt['log'],
                                 header="# epoch\ttrain_loss\tdev_loss\tdev_score\tbest_dev_score")
 # print model info
@@ -245,8 +247,8 @@ for epoch in train_iterator:
 
     dev_p, dev_r, dev_f1 = scorer.score(dev_golds, predictions)
 
-    print("epoch {}: train_loss = {:.6f}, dev_loss = {:.6f}, dev_f1 = {:.4f}".format(epoch,
-                                                                                     train_loss, dev_loss, dev_f1))
+    logger.info("epoch {}: train_loss = {:.6f}, dev_loss = {:.6f}, dev_f1 = {:.4f}".format(epoch,
+                                                                                           train_loss, dev_loss, dev_f1))
     dev_score = dev_f1
     file_logger.log("{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}".format(epoch, train_loss, dev_loss,
                                                                 dev_score, max([dev_score] + dev_score_history)))
