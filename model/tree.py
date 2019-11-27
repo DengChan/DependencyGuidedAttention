@@ -61,6 +61,7 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
     """
     Convert a sequence of head indexes into a tree object.
     """
+
     head = head[:len_]
     root = None
 
@@ -104,7 +105,13 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
             obj_ancestors.add(h - 1)
             h = head[h - 1]
         cas.intersection_update(tmp)
-
+    try:
+        ll = len(cas)
+    except:
+        print("tokens: %s", " ".join([str(x) for x in tokens]))
+        print("heads: %s", " ".join([str(x) for x in head]))
+        print("subj: %s", " ".join([str(x) for x in subj_pos]))
+        print("obj: %s", " ".join([str(x) for x in obj_pos]))
     # find lowest common ancestor
     if len(cas) == 1:
         lca = list(cas)[0]

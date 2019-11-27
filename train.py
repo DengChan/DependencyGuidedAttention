@@ -17,12 +17,15 @@ from tqdm import trange, tqdm
 from model.trainer import GCNTrainer
 from model.bert import BertConfig, BertTokenizer
 from utils import torch_utils, scorer, constant, helper
-from data.dataset import RelationDataset
+from data.dataset import RelationDataset, collate_fn
 
 from tensorboardX import SummaryWriter
 from torch.nn import CrossEntropyLoss
 
 import logging
+from utils import golVars
+
+golVars._init()
 
 
 parser = argparse.ArgumentParser()
@@ -61,7 +64,7 @@ parser.add_argument('--word_dropout', type=float, default=0.04, help='The rate a
 parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
 
 
-parser.add_argument('--entity_mask', type=bool, default=False,
+parser.add_argument('--entity_mask', type=bool, default=True,
                     help="use ner kind to mask entity word")
 parser.add_argument('--self_loop', type=bool, default=True,
                     help="use ner kind to mask entity word")
@@ -148,30 +151,36 @@ tokenizer = BertTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_
                                           cache_dir=args.cache_dir if args.cache_dir else None)
 
 
-# load data
-print("Loading data from {} with batch size {}...".format(opt['data_dir'], opt['batch_size']))
-
-train_dataset = RelationDataset(opt, mode="train", tokenizer=tokenizer)
-train_sampler = RandomSampler(train_dataset)
-train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.batch_size,
-                              collate_fn=train_dataset.collate_fn)
-t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_epoch
-opt["t_total"] = t_total
-
-dev_dataset = RelationDataset(opt, mode="dev", tokenizer=tokenizer)
-dev_sampler = SequentialSampler(dev_dataset)
-dev_dataloader = DataLoader(dev_dataset, sampler=dev_sampler, batch_size=args.batch_size,
-                            collate_fn=dev_dataset.collate_fn)
-
 model_id = opt['id'] if len(opt['id']) > 1 else '0' + opt['id']
 model_save_dir = opt['save_dir'] + '/' + model_id
 opt['model_save_dir'] = model_save_dir
 helper.ensure_dir(model_save_dir, verbose=True)
 
+# load data
+print("Loading data from {} with batch size {}...".format(opt['data_dir'], opt['batch_size']))
+# helper.ensure_dir("./tmp/")
+# helper.save_config(opt, "./tmp/tmp_opt.json", verbose=False)
+# helper.save_tokenizer("./tmp/tmp_tkz.pkl", tokenizer)
+# global output_examples
+golVars.set_value("OPT", opt)
+golVars.set_value("TKZ", tokenizer)
+golVars.set_value("OUTPUT_EXAMPLES", True)
+train_dataset = RelationDataset(opt, mode="train", tokenizer=tokenizer)
+train_sampler = RandomSampler(train_dataset)
+train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.batch_size,
+                              collate_fn=collate_fn)
+
+dev_dataset = RelationDataset(opt, mode="dev", tokenizer=tokenizer)
+dev_sampler = SequentialSampler(dev_dataset)
+dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size,
+                            collate_fn=collate_fn, shuffle=False)
+
+t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_epoch
+opt["t_total"] = t_total
 # save config
 helper.save_config(opt, model_save_dir + '/config.json', verbose=True)
-file_logger = helper.FileLogger(model_save_dir + '/' + opt['log'], header="# epoch\ttrain_loss\tdev_loss\tdev_score\tbest_dev_score")
-
+file_logger = helper.FileLogger(model_save_dir + '/' + opt['log'],
+                                header="# epoch\ttrain_loss\tdev_loss\tdev_score\tbest_dev_score")
 # print model info
 helper.print_config(opt)
 

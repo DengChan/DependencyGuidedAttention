@@ -113,3 +113,6 @@ class BertConfig(PretrainedConfig):
         else:
             raise ValueError("First argument must be either a vocabulary size (int)"
                              " or the path to a pretrained model config file (str)")
+
+    def set_vocab_size(self, tokenizer):
+        self.vocab_size = tokenizer.vocab_size()

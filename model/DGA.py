@@ -189,9 +189,10 @@ class Encoder(nn.Module):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def load_bert_model(self):
-        self.bert.from_pretrained(self.opt["model_name_or_path"],
-                                  config=self.config,
-                                  cache_dir=self.opt["cache_dir"] if self.opt["cache_dir"] else None)
+        self.bert = self.bert.from_pretrained(self.opt["model_name_or_path"],
+                                              config=self.config,
+                                              cache_dir=self.opt["cache_dir"] if self.opt["cache_dir"] else None)
+        print("Load Bert Model successfully")
 
     def forward(self, input_ids, attention_mask, token_type_ids,
                 position_ids=None, head_mask=None, inputs_embeds=None, labels=None):

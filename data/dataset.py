@@ -37,13 +37,13 @@ import torch
 
 from torch.utils.data import Dataset
 
-from utils import constant
+from utils import constant, helper, golVars
 from model.tree import head_to_tree, tree_to_adj
-
 
 
 import logging
 logger = logging.getLogger(__name__)
+output_examples = True
 
 
 class InputExample(object):
@@ -101,23 +101,39 @@ def read_examples_from_file(opt, data_dir, mode):
     with open(file_path, encoding="utf-8") as f:
         all_data = json.load(f)
         for single_data in all_data:
+            ss = single_data["subj_start"]
+            se = single_data["subj_end"]
+            st = single_data["subj_type"]
+            objs = single_data["obj_start"]
+            obje = single_data["obj_end"]
+            ot = single_data["obj_type"]
+            if opt["entity_mask"]:
+                single_data["token"][ss:se + 1] = ['SUBJ-' + st] * (se - ss + 1)
+                single_data["token"][objs:obje + 1] = ['OBJ-' + ot] * (obje - objs + 1)
+
             for i, t in enumerate(single_data["token"]):
+                # 实现Entity Mask
                 if "LRB" in t:
                     single_data["token"][i] = '“'
                 elif "RRB" in t:
                     single_data["token"][i] = '”'
-                # if len(t) > 7:
-                #     if "http:" in t or "https:" in t or "www" in t or ".org/" in t or \
-                #             (".com" in t and "@" not in t) or (".ss" in t and "@" not in t):
-                #         single_data["token"][i] = "WEB-URL"
-                #     elif ("com" in t and "@" in t) or (".net" in t and "@" in t) or (".ss" in t and "@" in t):
-                #         single_data["token"][i] = "E-MAIL"
-                #     elif re.match(r'(([A-Z]*[0-9][A-Z]*)+[-])+', t) is not None:
-                #         single_data["token"][i] = "E-CODE"
-                #     elif re.match(r'(,*[0-9])+', t) is not None or re.match(r'([A-Za-z]*[0-9][A-Za-z]*){5,}', t) is not None:
-                #         single_data["token"][i] = "E-NUM"
-                #     else:
-                #         continue
+                elif t in constant.ADDITIONAL_WORDS:
+                    continue
+                elif re.match(r'[=+*-.#$@!~_—]+$', t) is not None:
+                    single_data["token"][i] = t[0]
+
+                if len(t) > 5:
+                    if "http:" in t or "https:" in t or "www" in t or ".org/" in t or \
+                            (".com" in t and "@" not in t) or (".ss" in t and "@" not in t):
+                        single_data["token"][i] = "WEB-URL"
+                    elif ("com" in t and "@" in t) or (".net" in t and "@" in t) or (".ss" in t and "@" in t):
+                        single_data["token"][i] = "E-MAIL"
+                    elif re.match(r'(([A-Z]*[0-9][A-Z]*)+[-]([A-Z]*[0-9][A-Z]*)+)+', t) is not None:
+                        single_data["token"][i] = "E-CODE"
+                    elif re.match(r'(,*[0-9])+', t) is not None or re.match(r'([A-Za-z]*[0-9][A-Za-z]*){4,}', t) is not None:
+                        single_data["token"][i] = "E-NUM"
+                    else:
+                        continue
 
             examples.append(InputExample(opt, single_data))
     return examples
@@ -151,11 +167,15 @@ def convert_examples_to_features(opt,
         idx = 0
         word_tokens_tmp = [] # 备份word_wokens 用于新的head的计算
         subword_mask = []
+
+        # 如果分词后，长度大于128 就不分词了
+        canTokenize = testCanTokenize(example.words, tokenizer)
+
         for word, pos, ner, deprel in zip(example.words, example.pos, example.ner, example.deprel):
             # 更新old2new的映射
             old_index2new_index.append(len(tokens))
             # 获取分词
-            word_tokens = tokenizeWord(word, tokenizer)
+            word_tokens = tokenizeWord(word, tokenizer, canTokenize)
             word_tokens_tmp.append(word_tokens)
             tokens.extend(word_tokens)
             # 更新old_end2new_end的映射
@@ -230,11 +250,6 @@ def convert_examples_to_features(opt,
         subj_pos = get_positions(subj_start, subj_end, l)
         obj_pos = get_positions(obj_start, obj_end, l)
 
-        # 实现Entity Mask
-        if opt["entity_mask"]:
-            tokens[subj_start:subj_end + 1] = ['SUBJ-' + example.subj_type] * (subj_end - subj_start + 1)
-            tokens[obj_start:obj_end + 1] = ['OBJ-' + example.obj_type] * (obj_end - obj_start + 1)
-
         seq_len = len(tokens)
         assert len(subword_mask) == len(tokens)
         assert len(ner_ids) == seq_len
@@ -245,7 +260,7 @@ def convert_examples_to_features(opt,
         assert len(deprel_ids) == seq_len
         assert len(old_end2new_end) == len(example.head)
 
-        features.append(InputFeatures(tokens, len(tokens), subword_mask, label_id, ner_ids, pos_ids, deprel_ids,
+        features.append(InputFeatures(tokens, seq_len, subword_mask, label_id, ner_ids, pos_ids, deprel_ids,
                                       subj_pos, obj_pos, old_index2new_index, old_end2new_end,
                                       example.subj_type, example.obj_type, heads, example.head))
     print(" MAX LEN IS : {}".format(max_len))
@@ -337,29 +352,31 @@ class RelationDataset(Dataset):
     def __getitem__(self, item):
         return self.features[item]
 
-    def collate_fn(self, features):
-        batch_data = convertData(self.opt, features, self.tokenizer,
-                                 cls_token=self.tokenizer.cls_token,
-                                 sep_token=self.tokenizer.sep_token,
-                                 pad_token=0, output_examples=self.output_examples)
-        self.output_examples = False
-        return batch_data
+
+def collate_fn(features):
+    opt = golVars.get_value("OPT")
+    tokenizer = golVars.get_value("TKZ")
+    batch_data = convertData(opt, features, tokenizer,
+                             cls_token=tokenizer.cls_token,
+                             sep_token=tokenizer.sep_token,
+                             pad_token=0)
+    golVars.set_value("OUTPUT_EXAMPLES", False)
+    return batch_data
 
 
 def convertData(opt, features, tokenizer,
                 cls_token_at_end=False, cls_token="[CLS]", cls_token_segment_id=0,
                 sep_token="[SEP]", sep_token_extra=False,
                 pad_on_left=False, pad_token=0, pad_token_segment_id=0,
-                sequence_a_segment_id=0, mask_padding_with_zero=True,
-                output_examples=False):
+                sequence_a_segment_id=0, mask_padding_with_zero=True):
 
     lengths = [f.length for f in features]
     batch_max_len = max(lengths)
     feature_cnt = 0
 
-    input_ids_lst, input_masks, subword_masks, segment_ids_lst, label_ids, ner_ids, pos_ids, deprel_ids, \
-    adjs, dists_lst, bg_list, ed_list, subj_type_ids, obj_type_ids, subj_poses, obj_poses = \
-        [list() for _ in range(16)]
+    input_ids_lst, input_masks_lst, subword_masks_lst, segment_ids_lst, label_ids, ner_ids_lst, pos_ids_lst,\
+    deprel_ids_lst, adjs, dists_lst, bg_list_lst, ed_list_lst, subj_type_ids, obj_type_ids, \
+    subj_pos_lst, obj_pos_lst = [list() for _ in range(16)]
 
     for feature in features:
         # 生成邻接矩阵,
@@ -396,48 +413,41 @@ def convertData(opt, features, tokenizer,
         # For classification tasks, the first vector (corresponding to [CLS]) is
         # used as as the "sentence vector". Note that this only makes sense because
         # the entire model is fine-tuned.
-        feature.tokens += [sep_token]
-        feature.ner_ids += [constant.PAD_ID]
-        feature.pos_ids += [constant.PAD_ID]
-        feature.deprel_ids += [constant.PAD_ID]
-        feature.subj_pos += [feature.subj_pos[-1] + 1]
-        feature.obj_pos += [feature.obj_pos[-1] + 1]
-        feature.subword_mask += [0]
+        tokens = feature.tokens + [sep_token]
+        ner_ids = feature.ner_ids + [constant.PAD_ID]
+        pos_ids = feature.pos_ids + [constant.PAD_ID]
+        deprel_ids = feature.deprel_ids + [constant.PAD_ID]
+        subj_pos = feature.subj_pos + [feature.subj_pos[-1] + 1]
+        obj_pos = feature.obj_pos + [feature.obj_pos[-1] + 1]
+        subword_mask = feature.subword_mask + [0]
         dists += [0]
 
-        if sep_token_extra:
-            # roberta uses an extra separator b/w pairs of sentences
-            feature.tokens += [sep_token]
-            feature.pos_ids += [constant.PAD_ID]
-            feature.ner_ids += [constant.PAD_ID]
-            feature.deprel_ids += [constant.PAD_ID]
-
-        segment_ids = [sequence_a_segment_id] * len(feature.tokens)
+        segment_ids = [sequence_a_segment_id] * len(tokens)
 
         if cls_token_at_end:
-            feature.tokens += [cls_token]
-            feature.ner_ids += [constant.PAD_ID]
-            feature.pos_ids += [constant.PAD_ID]
-            feature.deprel_ids += [constant.PAD_ID]
-            feature.subj_pos += [feature.subj_pos[0] - 1]
-            feature.obj_pos += [feature.obj_pos[0] - 1]
-            feature.subword_mask += [0]
+            tokens += [cls_token]
+            ner_ids += [constant.PAD_ID]
+            pos_ids += [constant.PAD_ID]
+            deprel_ids += [constant.PAD_ID]
+            subj_pos += [subj_pos[-1] + 1]
+            obj_pos += [obj_pos[-1] + 1]
+            subword_mask += [0]
 
             dists += [0]
             segment_ids += [cls_token_segment_id]
         else:
-            feature.tokens = [cls_token] + feature.tokens
-            feature.ner_ids = [constant.PAD_ID] + feature.ner_ids
-            feature.pos_ids = [constant.PAD_ID] + feature.pos_ids
-            feature.deprel_ids = [constant.PAD_ID] + feature.deprel_ids
-            feature.subj_pos = [feature.subj_pos[0] - 1] + feature.subj_pos
-            feature.obj_pos = [feature.obj_pos[0] - 1] + feature.obj_pos
-            feature.subword_mask = [0] + feature.subword_mask
+            tokens = [cls_token] + tokens
+            ner_ids = [constant.PAD_ID] + ner_ids
+            pos_ids = [constant.PAD_ID] + pos_ids
+            deprel_ids = [constant.PAD_ID] + deprel_ids
+            subj_pos = [subj_pos[0] - 1] + subj_pos
+            obj_pos = [obj_pos[0] - 1] + obj_pos
+            subword_mask = [0] + subword_mask
 
             dists = [0] + dists
             segment_ids = [cls_token_segment_id] + segment_ids
 
-        input_ids = tokenizer.convert_tokens_to_ids(feature.tokens)
+        input_ids = tokenizer.convert_tokens_to_ids(tokens)
         # The mask has 1 for real tokens and 0 for padding tokens. Only real
         # tokens are attended to.
         input_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
@@ -450,14 +460,14 @@ def convertData(opt, features, tokenizer,
             segment_ids = ([pad_token_segment_id] * padding_length) + segment_ids
             dists = ([0] * padding_length) + dists
 
-            feature.ner_ids = ([constant.PAD_ID] * padding_length) + feature.ner_ids
-            feature.pos_ids = ([constant.PAD_ID] * padding_length) + feature.pos_ids
-            feature.deprel_ids = ([constant.PAD_ID] * padding_length) + feature.deprel_ids
-            feature.subword_mask = ([0] * padding_length) + feature.subword_mask
+            ner_ids = ([constant.PAD_ID] * padding_length) + ner_ids
+            pos_ids = ([constant.PAD_ID] * padding_length) + pos_ids
+            deprel_ids = ([constant.PAD_ID] * padding_length) + deprel_ids
+            subword_mask = ([0] * padding_length) + subword_mask
 
             for i in range(padding_length):
-                feature.subj_pos = [feature.subj_pos[0] - 1] + feature.subj_pos
-                feature.obj_pos = [feature.obj_pos[0] - 1] + feature.obj_pos
+                subj_pos = [subj_pos[0] - 1] + subj_pos
+                obj_pos = [obj_pos[0] - 1] + obj_pos
 
         else:
             input_ids += ([pad_token] * padding_length)
@@ -465,19 +475,19 @@ def convertData(opt, features, tokenizer,
             segment_ids += ([pad_token_segment_id] * padding_length)
             dists += ([0] * padding_length)
 
-            feature.ner_ids += ([constant.PAD_ID] * padding_length)
-            feature.pos_ids += ([constant.PAD_ID] * padding_length)
-            feature.deprel_ids += ([constant.PAD_ID] * padding_length)
-            feature.subword_mask += ([0] * padding_length)
+            ner_ids += ([constant.PAD_ID] * padding_length)
+            pos_ids += ([constant.PAD_ID] * padding_length)
+            deprel_ids += ([constant.PAD_ID] * padding_length)
+            subword_mask += ([0] * padding_length)
             for i in range(padding_length):
-                feature.subj_pos += [feature.subj_pos[-1] + 1]
-                feature.obj_pos += [feature.obj_pos[-1] + 1]
+                subj_pos += [subj_pos[-1] + 1]
+                obj_pos += [obj_pos[-1] + 1]
 
         # 单独处理 adj
         adj = np.pad(adj, ((1, 1), (1, 1)), 'constant', constant_values=(0.0, 0.0))
 
-        feature.subj_pos = [p + opt["max_seq_length"] for p in feature.subj_pos]
-        feature.obj_pos = [p + opt["max_seq_length"] for p in feature.obj_pos]
+        subj_pos = [p + opt["max_seq_length"] for p in subj_pos]
+        obj_pos = [p + opt["max_seq_length"] for p in obj_pos]
 
         assert len(input_ids) == batch_max_len + 2
         assert len(input_mask) == batch_max_len + 2
@@ -485,71 +495,75 @@ def convertData(opt, features, tokenizer,
         assert len(dists) == batch_max_len + 2
         assert adj.shape[0] == batch_max_len + 2
 
-        assert len(feature.ner_ids) == batch_max_len + 2
-        assert len(feature.pos_ids) == batch_max_len + 2
-        assert len(feature.obj_pos) == batch_max_len + 2
-        assert len(feature.deprel_ids) == batch_max_len + 2
-        assert len(feature.subword_mask) == batch_max_len + 2
-        assert len(feature.subj_pos) == batch_max_len + 2
-        assert len(feature.obj_pos) == batch_max_len + 2
+        assert len(ner_ids) == batch_max_len + 2
+        assert len(pos_ids) == batch_max_len + 2
+        assert len(obj_pos) == batch_max_len + 2
+        assert len(deprel_ids) == batch_max_len + 2
+        assert len(subword_mask) == batch_max_len + 2
+        assert len(subj_pos) == batch_max_len + 2
+        assert len(obj_pos) == batch_max_len + 2
 
-        if output_examples and feature_cnt < 5:
+        if golVars.get_value("OUTPUT_EXAMPLES") and feature_cnt < 5:
             logger.info("*** Example ***")
             logger.info("Label Id: {}".format(feature.label_id))
-            logger.info("tokens: %s", " ".join([str(x) for x in feature.tokens]))
+            logger.info("tokens: %s", " ".join([str(x) for x in tokens]))
             logger.info("input_ids: %s", " ".join([str(x) for x in input_ids]))
             logger.info("input_mask: %s", " ".join([str(x) for x in input_mask]))
             logger.info("segment_ids: %s", " ".join([str(x) for x in segment_ids]))
-            logger.info("subword_mask: %s", " ".join([str(x) for x in feature.subword_mask]))
-            logger.info("ner_ids: %s", " ".join([str(x) for x in feature.ner_ids]))
-            logger.info("subj_position: %s", " ".join([str(x) for x in feature.subj_pos]))
+            logger.info("subword_mask: %s", " ".join([str(x) for x in subword_mask]))
+            logger.info("ner_ids: %s", " ".join([str(x) for x in ner_ids]))
+            logger.info("subj_position: %s", " ".join([str(x) for x in subj_pos]))
             logger.info("LCA distances: %s", " ".join([str(x) for x in dists]))
             logger.info("Adj(front 10 node): {}".format(adj[:10, :10]))
             feature_cnt += 1
 
-        input_ids_lst.append(input_ids)
-        input_masks.append(input_mask)
-        segment_ids_lst.append(segment_ids)
-        adjs.append(adj)
-        dists_lst.append(dists)
-
-        subword_masks.append(feature.subword_mask)
         label_ids.append(feature.label_id)
-        ner_ids.append(feature.ner_ids)
-        pos_ids.append(feature.pos_ids)
-        deprel_ids.append(feature.deprel_ids)
-        subj_poses.append(feature.subj_pos)
-        obj_poses.append(feature.obj_pos)
-        bg_list.append(feature.bg_list)
-        ed_list.append(feature.ed_list)
         subj_type_ids.append(constant.SUBJ_NER_TO_ID[feature.subj_type])
         obj_type_ids.append(constant.OBJ_NER_TO_ID[feature.obj_type])
+        adjs.append(adj)
+        bg_list_lst.append(feature.bg_list)
+        ed_list_lst.append(feature.ed_list)
+
+        input_ids_lst.append(input_ids)
+        input_masks_lst.append(input_mask)
+        segment_ids_lst.append(segment_ids)
+        dists_lst.append(dists)
+        subword_masks_lst.append(subword_mask)
+        ner_ids_lst.append(ner_ids)
+        pos_ids_lst.append(pos_ids)
+        deprel_ids_lst.append(deprel_ids)
+        subj_pos_lst.append(subj_pos)
+        obj_pos_lst.append(obj_pos)
 
     input_ids_lst = torch.tensor(input_ids_lst, dtype=torch.long).cuda()
     dists_lst = torch.tensor(dists_lst, dtype=torch.long).cuda()
     segment_ids_lst = torch.tensor(segment_ids_lst, dtype=torch.long).cuda()
 
-    input_masks = torch.tensor(input_masks, dtype=torch.long).cuda()
-    subword_masks = torch.tensor(subword_masks, dtype=torch.long).cuda()
-    ner_ids = torch.tensor(ner_ids, dtype=torch.long).cuda()
-    pos_ids = torch.tensor(pos_ids, dtype=torch.long).cuda()
-    deprel_ids = torch.tensor(deprel_ids, dtype=torch.long).cuda()
+    input_masks_lst = torch.tensor(input_masks_lst, dtype=torch.long).cuda()
+    # subword_masks_lst = torch.tensor(subword_masks_lst, dtype=torch.long).cuda()
+    ner_ids_lst = torch.tensor(ner_ids_lst, dtype=torch.long).cuda()
+    pos_ids_lst = torch.tensor(pos_ids_lst, dtype=torch.long).cuda()
+    deprel_ids_lst = torch.tensor(deprel_ids_lst, dtype=torch.long).cuda()
     adjs = torch.tensor(adjs, dtype=torch.float).cuda()
-    subj_poses = torch.tensor(subj_poses, dtype=torch.long).cuda()
-    obj_poses = torch.tensor(obj_poses, dtype=torch.long).cuda()
+    subj_pos_lst = torch.tensor(subj_pos_lst, dtype=torch.long).cuda()
+    obj_pos_lst = torch.tensor(obj_pos_lst, dtype=torch.long).cuda()
     label_ids = torch.tensor(label_ids, dtype=torch.long).cuda()
 
-    return input_ids_lst, input_masks, subword_masks, segment_ids_lst, label_ids, ner_ids, pos_ids, deprel_ids, \
-        adjs, dists_lst, subj_poses, obj_poses, bg_list, ed_list, subj_type_ids, obj_type_ids
+    return input_ids_lst, input_masks_lst, subword_masks_lst, segment_ids_lst, label_ids, ner_ids_lst, pos_ids_lst, \
+           deprel_ids_lst, adjs, dists_lst, subj_pos_lst, obj_pos_lst, bg_list_lst, ed_list_lst, subj_type_ids, obj_type_ids
 
 
-def tokenizeWord(word, tokenizer):
-    if word in constant.ADDITIONAL_WORDS:
+def tokenizeWord(word, tokenizer, canTokenize=True):
+    if word in constant.ADDITIONAL_WORDS or word in tokenizer.vocab:
         return [word]
-    elif re.match(r'[=+*-.#$@!~_—]+$', word) is not None:
-        return [word[0]]
-
-    word_tokens = tokenizer.tokenize(word)
+    elif word[0] + word[1:] in tokenizer.vocab:
+        return [word[0] + word[1:]]
+    elif word.lower() in tokenizer.vocab:
+        return [word.lower()]
+    if canTokenize:
+        word_tokens = tokenizer.tokenize(word)
+    else:
+        word_tokens = [word]
     # if 5 < len(word_tokens) <= 7:
     #     print(word)
     #     print(word_tokens)
@@ -559,4 +573,15 @@ def tokenizeWord(word, tokenizer):
     return word_tokens
 
 
+def testCanTokenize(words, tokenizer):
+    tokens = []
+    for word in words:
+        # 更新old2new的映射
+        word_tokens = tokenizeWord(word, tokenizer)
+        tokens.extend(word_tokens)
+    if len(tokens) > 126:
+        # logger.info("Over 128 Length tokens: %s", " ".join([str(x) for x in tokens]))
+        return False
+    else:
+        return True
 
