@@ -54,8 +54,12 @@ class GCNTrainer(Trainer):
         if opt['cuda']:
             self.model.cuda()
         no_decay = ["bias", "LayerNorm.weight"]
+        params = [(n, p) for n, p in self.model.Decoder.named_parameters()]
+        if opt["fintune_bert"]:
+            params += [(n, p) for n, p in self.model.Encoder.named_parameters()]
+
         optimizer_grouped_parameters = [
-            {"params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+            {"params": [p for n, p in params if not any(nd in n for nd in no_decay)],
              "weight_decay": opt["weight_decay"]},
             {"params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
              "weight_decay": 0.0}

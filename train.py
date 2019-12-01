@@ -45,6 +45,9 @@ parser.add_argument("--max_seq_length", default=300, type=int,
                          "than this will be truncated, sequences shorter will be padded.")
 
 parser.add_argument('--data_dir', type=str, default='dataset/')
+
+parser.add_argument('--fintune_bert', type=bool, default=True, help="fintune bert or not")
+
 # Input
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
