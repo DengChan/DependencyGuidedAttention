@@ -119,6 +119,8 @@ def read_examples_from_file(opt, data_dir, mode):
                     single_data["token"][i] = '”'
                 elif t in constant.ADDITIONAL_WORDS:
                     continue
+                elif t == "co-founder":
+                    single_data["token"][i] = "founder"
                 elif re.match(r'[=+*-.#$@!~_—]+$', t) is not None:
                     single_data["token"][i] = t[0]
 

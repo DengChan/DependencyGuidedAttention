@@ -3,7 +3,7 @@ Train a model on TACRED.
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import time
 import pickle
@@ -48,18 +48,25 @@ parser.add_argument('--data_dir', type=str, default='dataset/')
 # Input
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
+parser.add_argument('--dep_dim', type=int, default=50, help='dependency embedding dimension.')
 parser.add_argument('--dist_dim', type=int, default=56, help='LCA distance embedding dimension.')
+parser.add_argument('--label_dim', type=int, default=128, help='LCA distance embedding dimension.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
 
+# GCN
+parser.add_argument('--gcn_hidden_dim', type=int, default=256, help='gcn hidden dim dimension.')
+parser.add_argument('--gcn_layers', type=int, default=2, help='gcn layers.')
 
 # Attention
 parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
-parser.add_argument('--V_dim', type=int, default=64, help='V dimension.')
+parser.add_argument('--V_dim', type=int, default=128, help='V dimension.')
+# Entity
+parser.add_argument('--entity_hidden_dim', type=int, default=128, help='hidden state size.')
+
+# Output
+parser.add_argument('--hidden_dim', type=int, default=256, help='output hidden state size.')
 parser.add_argument('--num_heads', type=int, default=4, help='num of heads')
-parser.add_argument('--feedforward_dim', type=int, default=512, help='feedforward dim')
-parser.add_argument('--hidden_dim', type=int, default=256, help='hidden state size.')
-parser.add_argument('--num_layers', type=int, default=6, help='Num of Sequence Encoder layers.')
-parser.add_argument('--dep_layers', type=int, default=0, help='Num of Dependency Encoder layers.')
+parser.add_argument('--match_loss_weight', type=float, default=0.5, help='match loss weight.')
 
 
 parser.add_argument('--word_dropout', type=float, default=0.04, help='The rate at which randomly set a word to UNK.')
@@ -68,15 +75,15 @@ parser.add_argument("--do_lower_case", action="store_true", help="Set this flag 
 
 parser.add_argument('--entity_mask', type=bool, default=True,
                     help="use ner kind to mask entity word")
-parser.add_argument('--self_loop', type=bool, default=True,
+parser.add_argument('--self_loop', type=bool, default=False,
                     help="use ner kind to mask entity word")
 parser.add_argument('--first_subword_ner', type=bool, default=False,
                     help="only tag first subword ner, left subword is masked")
 parser.add_argument('--subword_to_children', type=bool, default=True,
                     help="treat subword to first subword's child in dep tress")
-parser.add_argument('--only_child', type=bool, default=False, help="whether use double direction edge.")
+parser.add_argument('--only_child', type=bool, default=True, help="whether use double direction edge.")
 parser.add_argument('--deprel_edge', type=bool, default=False, help="whether use deprel info on edge")
-parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
+parser.add_argument('--prune_k', default=1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
 
 
 parser.add_argument('--conv_l2', type=float, default=0.0, help='L2-weight decay on conv layers only.')
@@ -99,7 +106,6 @@ parser.add_argument('--max_grad_norm', type=float, default=10.0, help='Gradient 
 
 parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps.")
 
-parser.add_argument('--log_step', type=int, default=50, help='Print log every k steps.')
 parser.add_argument('--log', type=str, default='logs.txt', help='Write training log to file.')
 parser.add_argument('--save_epoch', type=int, default=30, help='Save model checkpoints every k epochs.')
 parser.add_argument('--save_dir', type=str, default='./saved_models', help='Root dir for saving models.')

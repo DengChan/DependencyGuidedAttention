@@ -5,6 +5,7 @@ from apex import amp
 import torch
 
 from model.DGA import DGAModel
+from model.BERT import BertRE
 from model.bert import AdamW, get_linear_schedule_with_warmup
 from utils import constant, torch_utils
 
@@ -48,7 +49,7 @@ class Trainer(object):
 class GCNTrainer(Trainer):
     def __init__(self, opt, config):
         self.opt = opt
-        self.model = DGAModel(opt, config)
+        self.model = BertRE(opt, config)
         self.parameters = [p for p in self.model.parameters() if p.requires_grad]
         if opt['cuda']:
             self.model.cuda()
