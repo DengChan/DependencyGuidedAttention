@@ -29,8 +29,10 @@ logger = logging.getLogger(__name__)
 
 golVars._init()
 
-
 parser = argparse.ArgumentParser()
+parser.add_argument('--load', type=bool, default=False, help="load model to use")
+parser.add_argument('--model_file', type=str, default="./saved_models/12/best_model.pt",
+                    help='Filename of the pretrained model.')
 
 parser.add_argument("--model_name_or_path", default="",
                     type=str, help="Path to pre-trained model")
@@ -63,12 +65,13 @@ parser.add_argument('--gcn_layers', type=int, default=2, help='gcn layers.')
 # Attention
 parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
 parser.add_argument('--V_dim', type=int, default=128, help='V dimension.')
+parser.add_argument('--num_heads', type=int, default=4, help='num of heads')
+
 # Entity
 parser.add_argument('--entity_hidden_dim', type=int, default=128, help='hidden state size.')
 
 # Output
 parser.add_argument('--hidden_dim', type=int, default=256, help='output hidden state size.')
-parser.add_argument('--num_heads', type=int, default=4, help='num of heads')
 parser.add_argument('--match_loss_weight', type=float, default=0.5, help='match loss weight.')
 
 
@@ -124,8 +127,6 @@ parser.add_argument("--fp16_opt_level", type=str, default="O1",
                     help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3']."
                          "See details at https://nvidia.github.io/apex/amp.html")
 
-parser.add_argument('--load', dest='load', action='store_true', help='Load pretrained model.')
-parser.add_argument('--model_file', type=str, help='Filename of the pretrained model.')
 
 args = parser.parse_args()
 
@@ -169,10 +170,7 @@ helper.ensure_dir(model_save_dir, verbose=True)
 
 # load data
 print("Loading data from {} with batch size {}...".format(opt['data_dir'], opt['batch_size']))
-# helper.ensure_dir("./tmp/")
-# helper.save_config(opt, "./tmp/tmp_opt.json", verbose=False)
-# helper.save_tokenizer("./tmp/tmp_tkz.pkl", tokenizer)
-# global output_examples
+
 golVars.set_value("OPT", opt)
 golVars.set_value("TKZ", tokenizer)
 golVars.set_value("OUTPUT_EXAMPLES", True)
@@ -202,12 +200,10 @@ else:
     # load pretrained model
     model_file = opt['model_file']
     print("Loading model from {}".format(model_file))
-    model_opt = torch_utils.load_config(model_file)
-    model_opt['optim'] = opt['optim']
-    trainer = GCNTrainer(model_opt, config)
+    trainer = GCNTrainer(opt, config)
     trainer.load(model_file)
 
-id2label = dict([(v,k) for k,v in label2id.items()])
+id2label = dict([(v, k) for k, v in label2id.items()])
 dev_score_history = []
 current_lr = opt['lr']
 max_dev_scores = -1.0

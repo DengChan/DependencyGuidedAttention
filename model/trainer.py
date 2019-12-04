@@ -61,7 +61,7 @@ class GCNTrainer(Trainer):
         optimizer_grouped_parameters = [
             {"params": [p for n, p in params if not any(nd in n for nd in no_decay)],
              "weight_decay": opt["weight_decay"]},
-            {"params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+            {"params": [p for n, p in params if any(nd in n for nd in no_decay)],
              "weight_decay": 0.0}
         ]
         self.optimizer = AdamW(optimizer_grouped_parameters, lr=opt["lr"], eps=opt["adam_epsilon"])
