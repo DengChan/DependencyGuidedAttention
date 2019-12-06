@@ -266,10 +266,10 @@ class BertRE(nn.Module):
         seq_outputs = self.Encoder(input_ids, input_masks, segment_ids)[0]
 
         self.rel_logits, hidden_features = self.Decoder(seq_outputs, pos_ids, deprel_ids, subj_poses, obj_poses, adjs)
-        loss = self.cal_rel_loss(self.rel_logits, label_ids)
-        if self.opt["match_loss_weight"] > 0:
-            match_loss = self.cal_match_loss(self.rel_logits, label_ids, hidden_features, self.Decoder.embs.label_emb)
-            loss = loss + self.opt["match_loss_weight"] * match_loss
+        if self.opt["match_loss_weight"] <= 0:
+            loss = self.cal_rel_loss(self.rel_logits, label_ids)
+        else:
+            loss = self.cal_match_loss(self.rel_logits, label_ids)
         return loss, hidden_features
 
     def cal_rel_loss2(self, logits, labels):
@@ -300,7 +300,7 @@ class BertRE(nn.Module):
         batch_size = logits.size(0)
         class_num = len(constant.LABEL_TO_ID)
         one_hot = torch.zeros(batch_size, class_num).scatter_(1, labels.unsqueeze(1).cpu(), 1).cuda()
-        label_scores = torch.max(logits * one_hot)[0]  # [B]
+        label_scores = torch.max(logits * one_hot.float(), -1)[0]  # [B]
         # 扩大到[B X N]
         label_scores = label_scores.unsqueeze(1).repeat(1, class_num)  # [B x N]
         hinge_loss = logits - label_scores + 1
@@ -311,7 +311,6 @@ class BertRE(nn.Module):
         hinge_loss = torch.sum(hinge_loss)
         return hinge_loss
 
-        return (distance_loss + second_distance_loss) * -1
 
     def predict(self):
         probs = F.softmax(self.rel_logits, 1).data.cpu().numpy().tolist()
