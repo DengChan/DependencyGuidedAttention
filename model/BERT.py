@@ -21,19 +21,33 @@ class Attention(nn.Module):
         super(Attention, self).__init__()
         self.d_k = K_dim
         self.d_v = V_dim
-        self.W_Q = nn.Linear(input_Q_dim, self.d_k)
-        self.W_K = nn.Linear(input_K_dim, self.d_k)
+        self.W_Q = nn.ModuleList()
+        self.W_K = nn.ModuleList()
+        for i in range(len(constant.LABEL_TO_ID) - 1):
+            self.W_Q.append(nn.Linear(input_Q_dim, K_dim))
+            self.W_K.append(nn.Linear(input_K_dim, K_dim))
         self.W_V = nn.Linear(input_Q_dim, self.d_v)
+        self.W_out = nn.Linear(self.d_v, input_Q_dim)
+        self.layerNorm = nn.LayerNorm(input_Q_dim)
 
     def forward(self, Q, K, V, attn_mask):
-        Q = self.W_Q(Q) # [B x L x E]
-        K = self.W_K(K) # [B x 1 x E]
-        V = self.W_V(V) # [B x L x E]
-        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k) # scores : # [B x L x 1]
-        scores = scores + attn_mask.float() * -1e9
-        scores = scores.transpose(-1, -2) # [B x 1 x L]
-        attn = nn.Softmax(dim=-1)(scores)
-        context = torch.matmul(attn, V).squeeze(1) # [B x 1 x E]
+        # Q: [B x L x hidden size]
+        # K: [Num Label-1 x Label Emb]
+        scores_sum = 0
+        bs = Q.size()[0]
+        K = K.unsqueeze(0).repeat(bs, 1, 1)  # [B x NL x LE]
+        for i in range(len(constant.LABEL_TO_ID) - 1):
+            Qi = self.W_Q[i](Q)
+            Ki = self.W_K[i](K[:, i, :]).unsqueeze(1)
+            scores = torch.matmul(Qi, Ki.transpose(-1, -2)) / np.sqrt(self.d_k)  # scores : # [B x L x 1]
+            scores = scores + attn_mask.float() * -1e9
+            scores = scores.transpose(-1, -2)  # [B x 1 x L]
+            scores_sum = scores_sum + scores
+        attn = nn.Softmax(dim=-1)(scores_sum)
+        WV = self.W_V(V)
+        context = torch.matmul(attn, WV).squeeze(1)  # [B x E]
+        context = gelu(self.W_out(context))
+        context = self.layerNorm(context)
         return context, attn
 
 
@@ -76,7 +90,7 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.opt = opt
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.out_mlp = nn.Linear(config.hidden_size*3, config.hidden_size)
+        self.out_mlp = nn.Linear(config.hidden_size * 3, config.hidden_size)
         self.classifier = nn.Linear(config.hidden_size, len(constant.LABEL_TO_ID))
 
     def forward(self, seq_outputs, subj_pos, obj_pos, adj):
@@ -126,7 +140,7 @@ class Decoder2(nn.Module):
         self.context_decoder = Attention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
         self.entity_mlp = nn.Linear(config.hidden_size * 2, opt["entity_hidden_dim"])
 
-        hidden_size = opt["entity_hidden_dim"]+opt["V_dim"]+opt["gcn_hidden_dim"]
+        hidden_size = opt["entity_hidden_dim"] + opt["V_dim"] + opt["gcn_hidden_dim"]
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.out_mlp = nn.Linear(hidden_size, opt["hidden_dim"])
         self.out_mlp2 = nn.Linear(opt["hidden_dim"], opt["label_dim"])
@@ -148,18 +162,18 @@ class Decoder2(nn.Module):
         pos_embs, dep_embs, label_embs = self.embs(labels, pos_ids, dep_ids)
 
         # context
-        label_indicator = torch.mean(label_embs, 0).unsqueeze(0).repeat([bs, 1]).unsqueeze(1) # [B x 1 x label_dim]
+        label_indicator = torch.mean(label_embs, 0).unsqueeze(0).repeat([bs, 1]).unsqueeze(1)  # [B x 1 x label_dim]
         attn_mask = subj_pos.eq(pos_indicator) + obj_pos.eq(pos_indicator)
-        attn_mask = attn_mask.unsqueeze(2) # [B x L x 1]
-        context_feature, attn = self.context_decoder(inputs, label_indicator, inputs, attn_mask) # [B x V_dim]
+        attn_mask = attn_mask.unsqueeze(2)  # [B x L x 1]
+        context_feature, attn = self.context_decoder(inputs, label_indicator, inputs, attn_mask)  # [B x V_dim]
 
         # structure
         adj_gcn = adj
         if self.opt["deprel_edge"]:
             adj_gcn = adj.eq(0).eq(0)
         gcn_inputs = torch.cat([inputs, pos_embs, dep_embs], -1)
-        gcn_outputs = self.structure_decoder(adj_gcn, gcn_inputs) # [B x L x GCN_hidden]
-        structure_feature = pool(gcn_outputs, pool_mask, pool_type) # [B x GCN_hidden]
+        gcn_outputs = self.structure_decoder(adj_gcn, gcn_inputs)  # [B x L x GCN_hidden]
+        structure_feature = pool(gcn_outputs, pool_mask, pool_type)  # [B x GCN_hidden]
 
         # Entity
         subj_out = pool(inputs, subj_mask, type=pool_type)
@@ -177,13 +191,67 @@ class Decoder2(nn.Module):
         return logits, structure_feature, outputs
 
 
+class Decoder3(nn.Module):
+    def __init__(self, opt, config):
+        super(Decoder3, self).__init__()
+        self.opt = opt
+        self.config = config
+        self.embs = EmbeddingLayer(opt)
+
+        self.context_decoder = Attention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
+        self.feature_mlp = nn.Linear(config.hidden_size * 3, opt["hidden_dim"])
+
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.out_mlp = nn.Linear(opt["hidden_dim"], opt["label_dim"])
+        # self.classifier = nn.Linear(opt["label_dim"], len(constant.LABEL_TO_ID))
+
+    def forward(self, inputs, pos_ids, dep_ids, subj_pos, obj_pos, adj):
+        pos_indicator = int(self.opt["max_seq_length"])
+        pool_type = self.opt['pooling']
+        subj_mask = subj_pos.eq(pos_indicator).eq(0).unsqueeze(2)
+        obj_mask = obj_pos.eq(pos_indicator).eq(0).unsqueeze(2)  # invert mask
+
+        labels = torch.tensor(list(range(1, 42)), dtype=torch.long).cuda()
+        pos_embs, dep_embs, label_embs = self.embs(labels, pos_ids, dep_ids)
+
+        # context
+        attn_mask = subj_pos.eq(pos_indicator) + obj_pos.eq(pos_indicator)
+        attn_mask = attn_mask.unsqueeze(2)  # [B x L x 1]
+        context_feature, attn = self.context_decoder(inputs, label_embs, inputs, attn_mask)  # [B x V_dim]
+
+        # Entity
+        subj_out = pool(inputs, subj_mask, type=pool_type)
+        obj_out = pool(inputs, obj_mask, type=pool_type)
+
+        features = torch.cat([subj_out, obj_out, context_feature], -1)
+        features = self.dropout(features)
+        features = gelu(self.feature_mlp(features))
+        features = gelu(self.out_mlp(features))
+
+        labels = torch.tensor(list(range(0, 42)), dtype=torch.long).cuda()
+        logits = self.scorer(self.embs.label_emb(labels), features)
+        return logits, context_feature
+
+    def scorer(self, label_embs, features):
+        # label_embs : [N X E]
+        # features : [B X E]
+        batch_size = features.size()[0]
+        num_labels = label_embs.size()[0]
+        label_embs = label_embs.unsqueeze(0).repeat([batch_size, 1, 1])  # [B x N x E]
+        features = features.unsqueeze(1).repeat([1, num_labels, 1])  # [B x N x E]
+        scores = torch.sum(label_embs * features, -1)  # [B X N]
+        # scores = torch.nn.functional.softmax(scores, -1)
+        return scores
+
+
 class BertRE(nn.Module):
     def __init__(self, opt, config):
         super(BertRE, self).__init__()
         self.opt = opt
 
         self.Encoder = Encoder(opt, config)
-        self.Decoder = Decoder2(opt, config)
+        # self.Decoder = Decoder2(opt, config)
+        self.Decoder = Decoder3(opt, config)
         self.criterion = nn.CrossEntropyLoss()
         self.labels = None
         self.rel_logits = None
@@ -197,36 +265,53 @@ class BertRE(nn.Module):
         # Encoder
         seq_outputs = self.Encoder(input_ids, input_masks, segment_ids)[0]
 
-        self.rel_logits, seq_h_out, hidden_features = self.Decoder(seq_outputs, pos_ids, deprel_ids,
-                                                                   subj_poses, obj_poses, adjs)
+        self.rel_logits, hidden_features = self.Decoder(seq_outputs, pos_ids, deprel_ids, subj_poses, obj_poses, adjs)
+        loss = self.cal_rel_loss(self.rel_logits, label_ids)
+        if self.opt["match_loss_weight"] > 0:
+            match_loss = self.cal_match_loss(self.rel_logits, label_ids, hidden_features, self.Decoder.embs.label_emb)
+            loss = loss + self.opt["match_loss_weight"] * match_loss
+        return loss, hidden_features
 
-        rel_loss = self.cal_rel_loss(self.rel_logits, label_ids)
-        match_loss = self.cal_match_loss(self.rel_logits, label_ids, hidden_features, self.Decoder.embs.label_emb)
-        loss = rel_loss + self.opt["match_loss_weight"] * match_loss
-        return loss, seq_h_out
+    def cal_rel_loss2(self, logits, labels):
+        # logits : [B X N]
+        batch_size = logits.size(0)
+        class_num = len(constant.LABEL_TO_ID)
+        one_hot = torch.zeros(batch_size, class_num).scatter_(1, labels.unsqueeze(1).cpu(), 1).cuda()
+        pos_mask = one_hot.float()
+        pos_loss = torch.sum(logits * pos_mask, -1)  # [B]
+        score_mask = labels.eq(0)
+        pos_loss = torch.sigmoid(pos_loss).log().masked_fill_(score_mask, 0.0)  # mask 负标签， mask位置经过log后变为0
+        pos_loss = torch.sum(pos_loss, -1)
+
+        neg_loss, _ = torch.max(logits[:, 1:], -1)
+        score_mask = labels.eq(0).eq(0)
+        neg_loss = torch.sigmoid(-1 * neg_loss).log().masked_fill_(score_mask, 0.0)  # mask正标签, mask位置经过log后变为0
+        neg_loss = torch.sum(neg_loss, -1)
+        loss = pos_loss + neg_loss
+        return loss * -1
 
     def cal_rel_loss(self, logits, labels):
-        loss = self.criterion(logits, labels)
-        return loss
+        return self.criterion(logits, labels)
 
-    def cal_match_loss(self, logits, labels, hidden_features, label_emb):
-        # positive loss
-        labels_features = label_emb(labels) # [B x E]
-        # distance_loss = torch.norm(hidden_features - labels_features, dim=-1) # [B]
-        distance_loss = torch.sum(hidden_features * labels_features, -1)
-        score_mask = labels.eq(0)
-        distance_loss = distance_loss.masked_fill_(score_mask, 1.0) # mask 负标签， mask位置经过log后变为0
+    def cal_match_loss(self, logits, labels):
+        # logits : [B x N]
+        # labels : [B]
+        # get label scores
+        batch_size = logits.size(0)
+        class_num = len(constant.LABEL_TO_ID)
+        one_hot = torch.zeros(batch_size, class_num).scatter_(1, labels.unsqueeze(1).cpu(), 1).cuda()
+        label_scores = torch.max(logits * one_hot)[0]  # [B]
+        # 扩大到[B X N]
+        label_scores = label_scores.unsqueeze(1).repeat(1, class_num)  # [B x N]
+        hinge_loss = logits - label_scores + 1
+        # label 的位置设为0
+        hinge_loss = hinge_loss * (one_hot.eq(0).float())
+        hinge_loss = torch.clamp(hinge_loss, min=0)
+        hinge_loss = torch.mean(hinge_loss, -1)
+        hinge_loss = torch.sum(hinge_loss)
+        return hinge_loss
 
-        distance_loss = torch.sum(torch.sigmoid(distance_loss).log(), -1)
-
-        # negtive loss
-        second_labels = torch.argmax(logits[:, 1:], -1) + 1
-        second_labels_features = label_emb(second_labels)
-        second_distance_loss = torch.sum(hidden_features * second_labels_features, -1)
-        second_score_mask = second_labels.eq(0).eq(0)
-        second_distance_loss = second_distance_loss.masked_fill_(second_score_mask, -1.0)  # mask正标签, mask位置经过log后变为0
-        second_distance_loss = torch.sum(torch.sigmoid(-1 * second_distance_loss).log(), -1)
-        return (distance_loss+second_distance_loss) * -1
+        return (distance_loss + second_distance_loss) * -1
 
     def predict(self):
         probs = F.softmax(self.rel_logits, 1).data.cpu().numpy().tolist()

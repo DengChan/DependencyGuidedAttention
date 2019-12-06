@@ -31,7 +31,7 @@ golVars._init()
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--load', type=bool, default=False, help="load model to use")
-parser.add_argument('--model_file', type=str, default="./saved_models/12/best_model.pt",
+parser.add_argument('--model_file', type=str, default="",
                     help='Filename of the pretrained model.')
 
 parser.add_argument("--model_name_or_path", default="",
@@ -48,14 +48,14 @@ parser.add_argument("--max_seq_length", default=300, type=int,
 
 parser.add_argument('--data_dir', type=str, default='dataset/')
 
-parser.add_argument('--fintune_bert', type=bool, default=True, help="fintune bert or not")
+parser.add_argument('--fintune_bert', type=bool, default=False, help="fintune bert or not")
 
 # Input
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
 parser.add_argument('--dep_dim', type=int, default=50, help='dependency embedding dimension.')
 parser.add_argument('--dist_dim', type=int, default=56, help='LCA distance embedding dimension.')
-parser.add_argument('--label_dim', type=int, default=128, help='LCA distance embedding dimension.')
+parser.add_argument('--label_dim', type=int, default=64, help='LCA distance embedding dimension.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
 
 # GCN
@@ -65,17 +65,15 @@ parser.add_argument('--gcn_layers', type=int, default=2, help='gcn layers.')
 # Attention
 parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
 parser.add_argument('--V_dim', type=int, default=128, help='V dimension.')
-parser.add_argument('--num_heads', type=int, default=4, help='num of heads')
+parser.add_argument('--num_heads', type=int, default=1, help='num of heads')
 
 # Entity
 parser.add_argument('--entity_hidden_dim', type=int, default=128, help='hidden state size.')
 
 # Output
-parser.add_argument('--hidden_dim', type=int, default=256, help='output hidden state size.')
-parser.add_argument('--match_loss_weight', type=float, default=0.5, help='match loss weight.')
+parser.add_argument('--hidden_dim', type=int, default=512, help='output hidden state size.')
+parser.add_argument('--match_loss_weight', type=float, default=0.0, help='match loss weight.')
 
-
-parser.add_argument('--word_dropout', type=float, default=0.04, help='The rate at which randomly set a word to UNK.')
 parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
 
 
@@ -87,7 +85,7 @@ parser.add_argument('--first_subword_ner', type=bool, default=False,
                     help="only tag first subword ner, left subword is masked")
 parser.add_argument('--subword_to_children', type=bool, default=True,
                     help="treat subword to first subword's child in dep tress")
-parser.add_argument('--only_child', type=bool, default=True, help="whether use double direction edge.")
+parser.add_argument('--only_child', type=bool, default=False, help="whether use double direction edge.")
 parser.add_argument('--deprel_edge', type=bool, default=False, help="whether use deprel info on edge")
 parser.add_argument('--prune_k', default=1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
 
@@ -106,7 +104,7 @@ parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight deca
 
 parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                     help="Epsilon for Adam optimizer.")
-parser.add_argument('--num_epoch', type=int, default=200, help='Number of total training epochs.')
+parser.add_argument('--num_epoch', type=int, default=25, help='Number of total training epochs.')
 parser.add_argument('--batch_size', type=int, default=32, help='Training batch size.')
 parser.add_argument('--max_grad_norm', type=float, default=10.0, help='Gradient clipping.')
 
