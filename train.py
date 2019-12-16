@@ -55,17 +55,16 @@ parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimen
 parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
 parser.add_argument('--dep_dim', type=int, default=50, help='dependency embedding dimension.')
 parser.add_argument('--dist_dim', type=int, default=56, help='LCA distance embedding dimension.')
-parser.add_argument('--label_dim', type=int, default=64, help='LCA distance embedding dimension.')
+parser.add_argument('--label_dim', type=int, default=128, help='64 best, label embedding dimension.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
 
-# GCN
-parser.add_argument('--gcn_hidden_dim', type=int, default=256, help='gcn hidden dim dimension.')
-parser.add_argument('--gcn_layers', type=int, default=2, help='gcn layers.')
 
-# Attention
+# DGA & Attention
+parser.add_argument('--dga_layers', type=int, default=2, help='gcn layers.')
 parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
 parser.add_argument('--V_dim', type=int, default=128, help='V dimension.')
 parser.add_argument('--num_heads', type=int, default=1, help='num of heads')
+parser.add_argument('--attn_hidden_dim', type=int, default=256, help='dga hidden dim dimension.')
 
 # Entity
 parser.add_argument('--entity_hidden_dim', type=int, default=128, help='hidden state size.')
@@ -79,15 +78,18 @@ parser.add_argument("--do_lower_case", action="store_true", help="Set this flag 
 
 parser.add_argument('--entity_mask', type=bool, default=True,
                     help="use ner kind to mask entity word")
-parser.add_argument('--self_loop', type=bool, default=False,
+parser.add_argument('--self_loop', type=bool, default=True,
                     help="use ner kind to mask entity word")
 parser.add_argument('--first_subword_ner', type=bool, default=False,
                     help="only tag first subword ner, left subword is masked")
 parser.add_argument('--subword_to_children', type=bool, default=True,
                     help="treat subword to first subword's child in dep tress")
+parser.add_argument('--subtree', type=bool, default=True,
+                    help="use subtree dga mask")
 parser.add_argument('--only_child', type=bool, default=False, help="whether use double direction edge.")
+parser.add_argument('--only_child_but_father', type=bool, default=True, help="whether use double direction edge.")
 parser.add_argument('--deprel_edge', type=bool, default=False, help="whether use deprel info on edge")
-parser.add_argument('--prune_k', default=1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
+parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
 
 
 parser.add_argument('--conv_l2', type=float, default=0.0, help='L2-weight decay on conv layers only.')

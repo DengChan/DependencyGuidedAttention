@@ -177,7 +177,11 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
     return root, dist
 
 
-def tree_to_adj(max_len, sent_len, tree, only_child=False, self_loop=True):
+def tree_to_adj(max_len, sent_len, tree, head,
+                only_child=False,
+                self_loop=True,
+                subtree=False,
+                only_child_but_father=False):
     """
     Convert a tree object to an (numpy) adjacency matrix.
     """
@@ -189,12 +193,23 @@ def tree_to_adj(max_len, sent_len, tree, only_child=False, self_loop=True):
         t, queue = queue[0], queue[1:]
 
         idx += [t.idx]
-
         for c in t.children:
             ret[t.idx, c.idx] = 1
         queue += t.children
+    if subtree:
+        fill_children(tree, ret)
+        check = (ret <= 1)
+        assert False not in check
 
-    if not only_child:
+    if only_child:
+        pass
+    elif only_child_but_father:
+        for i in idx:
+            if i >= sent_len:
+                continue
+            father_idx = head[i] - 1
+            ret[i, father_idx] = 1
+    elif not only_child and not only_child_but_father:
         ret = ret + ret.T
 
     if self_loop:
@@ -213,3 +228,13 @@ def tree_to_dist(sent_len, tree):
         ret[node.idx] = node.dist
 
     return ret
+
+
+def fill_children(tree, ret):
+    root_idx = tree.idx
+    if len(tree.children) == 0:
+        return
+    for c in tree.children:
+        fill_children(c, ret)
+        ret[root_idx, :] = ret[root_idx, :] + ret[c.idx, :]
+    return tree

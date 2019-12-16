@@ -1,25 +1,8 @@
 # -*- coding: utf-8 -*-
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
-import torch.nn.functional as F
-
-import numpy as np
 import math
-
-from utils import constant
-
-from model.bert import BertModel
-
-MAX_SEQ_LEN = 100
-
-
-def Embedding(num_embeddings, embedding_dim, padding_idx=None):
-    m = nn.Embedding(num_embeddings, embedding_dim, padding_idx=padding_idx)
-    nn.init.normal_(m.weight, mean=0, std=embedding_dim ** -0.5)
-    if padding_idx is not None:
-        nn.init.constant_(m.weight[padding_idx], 0)
-    return m
+import numpy as np
 
 
 def gelu(x):
@@ -27,314 +10,169 @@ def gelu(x):
     return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
-def PoolingLayer(inputs, pool_mask, subj_mask, obj_mask, pool_type):
-    h_out = pool(inputs, pool_mask, type=pool_type)
-    subj_out = pool(inputs, subj_mask, type=pool_type)
-    obj_out = pool(inputs, obj_mask, type=pool_type)
-    outputs = torch.cat([h_out, subj_out, obj_out], dim=1)
-    return outputs, h_out
-
-
-class ScaledDotProductAttention(nn.Module):
-    def __init__(self, opt):
-        super(ScaledDotProductAttention, self).__init__()
-        self.d_k = opt["K_dim"]
-
-    def forward(self, Q, K, V, attn_mask, help_scores=None, ret_scores=False):
-        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k) # scores : [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]
-        scores.masked_fill_(attn_mask, -1e9) # Fills elements of self tensor with value where mask is one.
-
-        attn = nn.Softmax(dim=-1)(scores)
-        context = torch.matmul(attn, V)
-        if ret_scores:
-            return context, scores
-        return context, attn
-
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
-        super(MultiHeadAttention, self).__init__()
+class SelfAttention(nn.Module):
+    def __init__(self, input_dim, attn_dim, num_heads, dropout_prob=0.0):
+        super(SelfAttention, self).__init__()
         self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.opt = opt
-        self.d_k = opt["K_dim"]
-        self.d_v = opt["V_dim"]
-        self.n_heads = opt["num_heads"]
-        self.W_Q = nn.Linear(input_dim, self.d_k * self.n_heads)
-        self.W_K = nn.Linear(input_dim, self.d_k * self.n_heads)
-        self.W_V = nn.Linear(input_dim, self.d_v * self.n_heads)
-        self.DotProductAttention = ScaledDotProductAttention(opt)
-        self.Wout = nn.Linear(self.n_heads * self.d_v, self.output_dim)
-        self.layerNorm = nn.LayerNorm(self.output_dim)
+        self.num_attention_heads = num_heads
+        self.attention_head_size = attn_dim
+        # self.all_head_size = self.num_attention_heads * self.attention_head_size
+        self.all_head_size = attn_dim * num_heads
+        # 正常情况下 input_dim 应该等于 opt["hidden_dim"],
+        # 这是为了处理直接将word emmbeddings输入 导致的维度的问题
+        self.query = nn.Linear(input_dim, self.all_head_size)
+        self.key = nn.Linear(input_dim, self.all_head_size)
+        self.value = nn.Linear(input_dim, self.all_head_size)
 
-    def forward(self, Q, K, V, attn_mask, help_scores=None, ret_scores=False):
-        # q: [batch_size x len_q x d_model], k: [batch_size x len_k x d_model], v: [batch_size x len_k x d_model]
-        residual, batch_size = Q, Q.size(0)
-        # (B, S, D) -proj-> (B, S, D) -split-> (B, S, H, W) -trans-> (B, H, S, W)
-        try:
-            q_s = self.W_Q(Q).view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)  # q_s: [batch_size x n_heads x len_q x d_k]
-        except:
-            print("ERROR")
-        k_s = self.W_K(K).view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)  # k_s: [batch_size x n_heads x len_k x d_k]
-        v_s = self.W_V(V).view(batch_size, -1, self.n_heads, self.d_v).transpose(1,2)  # v_s: [batch_size x n_heads x len_k x d_v]
+        self.dropout = nn.Dropout(dropout_prob)
 
-        attn_mask = attn_mask.unsqueeze(1).repeat(1, self.n_heads, 1, 1) # attn_mask : [batch_size x n_heads x len_q x len_k]
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
 
-        # context: [batch_size x n_heads x len_q x d_v], attn: [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]
-        context, attn = self.DotProductAttention(q_s, k_s, v_s, attn_mask, help_scores, ret_scores)
-        context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.n_heads * self.d_v) # context: [batch_size x len_q x n_heads * d_v]
-        output = self.Wout(context)
-        if residual.size(-1) != output.size(-1):
-            return self.layerNorm(output), attn
-        return self.layerNorm(output + residual), attn # output: [batch_size x len_q x d_model]
+    def forward(self, hidden_states, attention_mask=None):
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        if attention_mask is not None:
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+            attention_mask = attention_mask.unsqueeze(1).repeat(1, self.num_attention_heads, 1, 1).float() * -10000.0
+            attention_scores = attention_scores + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        return context_layer, attention_probs
 
 
-class PoswiseFeedForwardNet(nn.Module):
-    def __init__(self, input_dim, feedforward_dim, dropout_prob):
-        super(PoswiseFeedForwardNet, self).__init__()
-        self.input_dim = input_dim
-        self.feedforward_dim = feedforward_dim
-        self.conv1 = nn.Conv1d(in_channels=self.input_dim, out_channels=self.feedforward_dim, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=self.feedforward_dim, out_channels=self.input_dim, kernel_size=1)
-        self.drop = nn.Dropout(dropout_prob)
-        self.layerNorm = nn.LayerNorm(self.input_dim)
+class Intermediate(nn.Module):
+    def __init__(self, attn_dim, feedforward_dim):
+        super(Intermediate, self).__init__()
+        self.dense = nn.Linear(attn_dim, feedforward_dim)
+        self.intermediate_act_fn = gelu
 
-    def forward(self, inputs):
-        residual = self.drop(inputs) # inputs : [batch_size, len_q, d_model]
-        output = gelu(self.conv1(inputs.transpose(1, 2)))
-        output = self.conv2(output).transpose(1, 2)
-        return self.layerNorm(output + residual)
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+        return hidden_states
+
+
+class SelfOutput(nn.Module):
+    def __init__(self, feedforward_dim, hidden_dim, dropout_prob):
+        super(SelfOutput, self).__init__()
+        self.dense = nn.Linear(feedforward_dim, hidden_dim)
+        self.LayerNorm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, opt, input_dim, output_dim):
+    def __init__(self, input_dim, attn_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob):
         super(EncoderLayer, self).__init__()
-        self.opt = opt
         self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.enc_self_attn = MultiHeadAttention(opt, input_dim, output_dim)
-        self.pos_ffn = PoswiseFeedForwardNet(output_dim, opt["feedforward_dim"], opt["input_dropout"])
+        self.self = SelfAttention(input_dim, attn_dim, num_heads, dropout_prob)
+        self.intermediate = Intermediate(attn_dim, feedforward_dim)
+        self.output = SelfOutput(feedforward_dim, hidden_dim, dropout_prob)
 
-    def forward(self, enc_inputs, enc_self_attn_mask, help_scores=None, ret_scores=False):
-        enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs, enc_self_attn_mask, help_scores, ret_scores) # enc_inputs to same Q,K,V
-        enc_outputs = self.pos_ffn(enc_outputs) # enc_outputs: [batch_size x len_q x d_model]
-        return enc_outputs, attn
-
-
-class LSTMLayer(nn.Module):
-    def __init__(self, opt, in_dim, hidden_dim):
-        super(LSTMLayer, self).__init__()
-        self.opt = opt
-        self.hidden_dim = hidden_dim
-        input_size = in_dim
-        self.rnn = nn.LSTM(input_size, hidden_dim, opt['rnn_layers'], batch_first=True,
-                           dropout=opt['rnn_dropout'], bidirectional=True)
-        self.in_dim = hidden_dim * 2
-        self.rnn_drop = nn.Dropout(opt['rnn_dropout'])  # use on last layer output
-        # self.rnn_layer_norm = nn.LayerNorm(self.in_dim)
-
-    def forward(self, rnn_inputs, masks, batch_size):
-        seq_lens = list(masks.data.eq(constant.PAD_ID).long().sum(1).squeeze())
-        h0, c0 = self.rnn_zero_state(batch_size, self.hidden_dim, self.opt['rnn_layers'])
-        rnn_inputs = nn.utils.rnn.pack_padded_sequence(rnn_inputs, seq_lens, batch_first=True)
-        rnn_outputs, (ht, ct) = self.rnn(rnn_inputs, (h0, c0))
-        rnn_outputs, _ = nn.utils.rnn.pad_packed_sequence(rnn_outputs, batch_first=True)
-        rnn_outputs = self.rnn_drop(rnn_outputs)
-        return rnn_outputs
-
-    def rnn_zero_state(batch_size, hidden_dim, num_layers, bidirectional=True, use_cuda=True):
-        total_layers = num_layers * 2 if bidirectional else num_layers
-        state_shape = (total_layers, batch_size, hidden_dim)
-        h0 = c0 = Variable(torch.zeros(*state_shape), requires_grad=False)
-        if use_cuda:
-            return h0.cuda(), c0.cuda()
-        else:
-            return h0, c0
+    def forward(self, hidden_states, attention_mask=None):
+        attention_output, attn = self.self(hidden_states, attention_mask)
+        intermediate_output = self.intermediate(attention_output)
+        layer_output = self.output(intermediate_output, attention_output)
+        return layer_output, attn
 
 
-class InputLayer(nn.Module):
-    def __init__(self, opt):
-        super().__init__()
-        self.opt = opt
-        self.pos_emb = Embedding(len(constant.POS_TO_ID), opt['pos_dim'], padding_idx=constant.PAD_ID)
-        self.ner_emb = Embedding(len(constant.NER_TO_ID), opt['ner_dim'], padding_idx=constant.PAD_ID)
+class PlainAttnLayer(nn.Module):
+    def __init__(self, input_dim, attn_dim, hidden_dim, v_dim, dropout_prob=0.0):
+        super(PlainAttnLayer, self).__init__()
+        self.d_k = attn_dim
+        self.d_v = attn_dim
+        self.W_Q = nn.Linear(input_dim, attn_dim)
+        self.W_K = nn.Linear(input_dim, attn_dim)
+        self.W_V = nn.Linear(input_dim, v_dim)
+        self.dropout_prob = dropout_prob
+        self.W_out = nn.Linear(v_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout_prob)
+        self.layerNorm = nn.LayerNorm(hidden_dim)
 
-    def forward(self, inputs):
-        words, masks, pos, ner, deprel, head, subj_pos, obj_pos, subj_type, obj_type = inputs  # unpack
-        # padding 是1 词是0
-        l = (masks.data.cpu().numpy() == 0).astype(np.int64).sum(1)
-        maxlen = max(l)
-        batch = len(words)
-
-        pos_embs = self.pos_emb(pos)
-        ner_embs = self.ner_emb(ner)
-
-        adj, dists = inputs_to_tree_reps(head.data, words.data, l, self.opt['prune_k'], subj_pos.data, obj_pos.data, deprel, maxlen)
-
-        dist_embs = None
-
-        dep_mask = get_mask_from_adj(adj)
-        # pad_mask = get_attn_pad_mask(words, words)
-        pad_mask, seq_mask = get_attn_masks(torch.Tensor(l).long().cuda(), int(maxlen))
-        return pos_embs, ner_embs, dist_embs, dep_mask, pad_mask, seq_mask, adj
+    def forward(self, Q, K, V, attn_mask):
+        # Q: [B x L x hidden size]
+        # K: [Num Label-1 x Label Emb]
+        Q = self.W_Q(Q)
+        K = self.W_K(K)
+        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k)  # scores : # [B x L x 1]
+        scores = scores + attn_mask.float() * -1e9
+        scores = scores.transpose(-1, -2)  # [B x L x L]
+        attn = nn.Softmax(dim=-1)(scores)
+        if self.dropout_prob > 0.0:
+            attn = self.dropout(attn)
+        WV = self.W_V(V)
+        context = torch.matmul(attn, WV) # [B x L x E]
+        context = gelu(self.W_out(context))
+        context = self.layerNorm(context)
+        return context, attn
 
 
 class Encoder(nn.Module):
-    def __init__(self, opt, config):
+    def __init__(self, num_layers, attn_dim, input_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob):
         super(Encoder, self).__init__()
-        self.opt = opt
-        self.config = config
-        self.bert = BertModel(config)
-        self.load_bert_model()
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            if i == 0:
+                # self.layers.append(EncoderLayer(input_dim, attn_dim,
+                #                                 hidden_dim, feedforward_dim, num_heads, dropout_prob))
+                self.layers.append(PlainAttnLayer(input_dim, attn_dim,
+                                                  hidden_dim, feedforward_dim, dropout_prob))
+            else:
+                # self.layers.append(EncoderLayer(hidden_dim, attn_dim,
+                #                                 hidden_dim, feedforward_dim, num_heads, dropout_prob))
+                self.layers.append(PlainAttnLayer(hidden_dim, attn_dim,
+                                                  hidden_dim, feedforward_dim, dropout_prob))
 
-    def load_bert_model(self):
-        self.bert = self.bert.from_pretrained(self.opt["model_name_or_path"],
-                                              config=self.config,
-                                              cache_dir=self.opt["cache_dir"] if self.opt["cache_dir"] else None)
-        print("Load Bert Model successfully")
-
-    def forward(self, input_ids, attention_mask, token_type_ids,
-                position_ids=None, head_mask=None, inputs_embeds=None, labels=None):
-        """
-        :return: outputs[0] : 最后一层的输出 [Batch X Length X Hidden Size]
-                outputs[1] : 每一个元素是每一层的输出[Batch X Length X Hidden Size] 的 list
-                outputs[2]: 每一层Attention值[Batch X Heads number X Length X Length]的 list
-        """
-
-        outputs = self.bert(input_ids,
-                            attention_mask=attention_mask,
-                            token_type_ids=token_type_ids,
-                            position_ids=position_ids,
-                            head_mask=head_mask,
-                            inputs_embeds=inputs_embeds)
-
-        outputs = (outputs[0],) + outputs[2:]  # add hidden states and attention if they are here
-        return outputs
-
-
-class Decoder(nn.Module):
-    def __init__(self, opt, config):
-        super(Decoder, self).__init__()
-        self.opt = opt
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.out_mlp = nn.Linear(config.hidden_size*3, config.hidden_size)
-        self.classifier = nn.Linear(config.hidden_size, len(constant.LABEL_TO_ID))
-
-    def forward(self, seq_outputs, subj_pos, obj_pos, adj):
-        # pooling
-        pos_indicator = int(self.opt["max_seq_length"])
-        subj_mask = subj_pos.eq(pos_indicator).eq(0).unsqueeze(2)
-        obj_mask = obj_pos.eq(pos_indicator).eq(0).unsqueeze(2)  # invert mask
-        if self.opt["deprel_edge"]:
-            adj_tmp = adj.eq(0).eq(0).long()
-            pool_mask = (adj_tmp.sum(2) + adj_tmp.sum(1)).eq(0).unsqueeze(2)
-        else:
-            pool_mask = (adj.sum(2) + adj.sum(1)).eq(0).unsqueeze(2)
-        pool_type = self.opt['pooling']
-        seq_subj_out = pool(seq_outputs, subj_mask, type=pool_type)
-        seq_obj_out = pool(seq_outputs, obj_mask, type=pool_type)
-        seq_h_out = pool(seq_outputs, pool_mask, type=pool_type)
-        outputs = torch.cat([seq_subj_out, seq_obj_out, seq_h_out], -1)
-        outputs = self.dropout(outputs)
-        outputs = gelu(self.out_mlp(outputs))
-        logits = self.classifier(outputs)
-        return logits, seq_h_out
+    def forward(self, inputs, attn_mask):
+        enc_self_attns = []
+        seq_inputs = inputs
+        for layer in self.layers:
+            seq_outputs, seq_self_attn = layer(seq_inputs, attn_mask)
+            seq_inputs = seq_outputs
+            enc_self_attns.append(seq_self_attn)
+        return seq_inputs, enc_self_attns
 
 
 class DGAModel(nn.Module):
-    def __init__(self, opt, config):
+    def __init__(self, num_layers, input_dim, attn_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob):
         super(DGAModel, self).__init__()
-        self.opt = opt
+        self.num_layers = num_layers
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.feedforward_dim = feedforward_dim
+        self.num_heads = num_heads
+        self.dropout_prob = dropout_prob
+        self.Encoder = Encoder(num_layers, input_dim, attn_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob)
 
-        self.Encoder = Encoder(opt, config)
-        self.Decoder = Decoder(opt, config)
-        self.criterion = nn.CrossEntropyLoss()
-        self.labels = None
-        self.rel_logits = None
-
-    def forward(self, inputs):
-        input_ids, input_masks, subword_masks, segment_ids, label_ids, ner_ids, pos_ids, deprel_ids, \
-        adjs, dists, subj_poses, obj_poses, bg_list, ed_list, subj_type_ids, obj_type_ids = inputs  # unpack
-
-        self.labels = label_ids
-
-        # Encoder
-        seq_outputs = self.Encoder(input_ids, input_masks, segment_ids)[0]
-
-        self.rel_logits, seq_h_out = self.Decoder(seq_outputs, subj_poses, obj_poses, adjs)
-        rel_loss = self.cal_rel_loss(self.rel_logits, label_ids)
-
-        return rel_loss, seq_h_out
-
-    def cal_rel_loss(self, logits, labels):
-        loss = self.criterion(logits, labels)
-        return loss
-
-    def predict(self):
-        probs = F.softmax(self.rel_logits, 1).data.cpu().numpy().tolist()
-        predictions = np.argmax(self.rel_logits.data.cpu().numpy(), axis=1).tolist()
-        return predictions, probs
-
-    def get_labels(self):
-        # lazy transform to list
-        self.labels = self.labels.cpu().numpy().tolist()
-        return self.labels
-
-
-def get_sinusoid_encoding_table(n_position, d_model):
-    def cal_angle(position, hid_idx):
-        return position / np.power(10000, 2 * (hid_idx // 2) / d_model)
-
-    def get_posi_angle_vec(position):
-        return [cal_angle(position, hid_j) for hid_j in range(d_model)]
-
-    sinusoid_table = np.array([get_posi_angle_vec(pos_i) for pos_i in range(n_position)])
-    sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
-    sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
-    return torch.FloatTensor(sinusoid_table).cuda()
-
-
-def get_mask_from_adj(adj):
-
-    mask = adj.eq(0)
-    return mask.cuda()
-
-
-def get_attn_pad_mask(seq_q, seq_k):
-    batch_size, len_q = seq_q.size()
-    batch_size, len_k = seq_k.size()
-    # eq(zero) is PAD token
-    pad_attn_mask = seq_k.data.eq(0).unsqueeze(1)  # batch_size x 1 x len_k(=len_q), one is masking
-    return pad_attn_mask.expand(batch_size, len_q, len_k).cuda()  # batch_size x len_q x len_k
-
-
-def get_attn_masks(lengths, slen):
-    """
-    Generate hidden states mask, and optionally an attention mask.
-    """
-    assert lengths.max().item() <= slen
-    bs = lengths.size(0)
-
-    alen = torch.arange(slen, dtype=torch.long)
-    if torch.cuda.is_available():
-        alen = alen.cuda()
-    mask = alen < lengths[:, None]
-    mask = mask.eq(0).unsqueeze(1).repeat(1, slen, 1)
-    attn_mask = alen[None, None, :].repeat(bs, slen, 1) <= alen[None, :, None]
-    attn_mask = attn_mask.eq(0)
-    # sanity check
-    assert attn_mask.size() == (bs, slen, slen)
-    return mask, attn_mask
-
-
-def pool(h, mask, type='max'):
-    if type == 'max':
-        h = h.masked_fill(mask, -constant.INFINITY_NUMBER)
-        return torch.max(h, 1)[0]
-    elif type == 'avg':
-        h = h.masked_fill(mask, 0)
-        return h.sum(1) / (mask.size(1) - mask.float().sum(1))
-    else:
-        h = h.masked_fill(mask, 0)
-        return h.sum(1)
+    def forward(self, inputs, dep_mask):
+        seq_outputs, self_attns = self.Encoder(inputs, dep_mask)
+        return seq_outputs, self_attns

@@ -9,6 +9,7 @@ from utils import constant
 
 from model.bert import BertModel
 from model.GCN import GCN
+from model.DGA import DGAModel
 
 
 def gelu(x):
@@ -16,9 +17,9 @@ def gelu(x):
     return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
-class Attention(nn.Module):
+class LabelAttention(nn.Module):
     def __init__(self, K_dim, V_dim, input_Q_dim, input_K_dim):
-        super(Attention, self).__init__()
+        super(LabelAttention, self).__init__()
         self.d_k = K_dim
         self.d_v = V_dim
         self.W_Q = nn.ModuleList()
@@ -44,6 +45,36 @@ class Attention(nn.Module):
             scores = scores.transpose(-1, -2)  # [B x 1 x L]
             scores_sum = scores_sum + scores
         attn = nn.Softmax(dim=-1)(scores_sum)
+        WV = self.W_V(V)
+        context = torch.matmul(attn, WV).squeeze(1)  # [B x E]
+        context = gelu(self.W_out(context))
+        context = self.layerNorm(context)
+        return context, attn
+
+
+class EntityAttention(nn.Module):
+    def __init__(self, K_dim, V_dim, input_Q_dim, input_K_dim):
+        super(EntityAttention, self).__init__()
+        self.d_k = K_dim
+        self.d_v = V_dim
+        self.W_Q = nn.Linear(input_Q_dim, K_dim)
+        self.W_K = nn.Linear(input_K_dim, K_dim)
+
+        self.W_V = nn.Linear(input_Q_dim, V_dim)
+        self.W_out = nn.Linear(V_dim, input_Q_dim)
+        self.layerNorm = nn.LayerNorm(input_Q_dim)
+
+    def forward(self, Q, K, V, attn_mask):
+        # Q: [B x L x hidden size]
+        # K: [B x entity Emb]
+
+        Q = self.W_Q(Q)
+        K = self.W_K(K).unsqueeze(1)
+        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(self.d_k)  # scores : # [B x L x 1]
+        scores = scores + attn_mask.float() * -1e9
+        scores = scores.transpose(-1, -2)  # [B x 1 x L]
+        attn = nn.Softmax(dim=-1)(scores)
+
         WV = self.W_V(V)
         context = torch.matmul(attn, WV).squeeze(1)  # [B x E]
         context = gelu(self.W_out(context))
@@ -137,7 +168,7 @@ class Decoder2(nn.Module):
         self.structure_decoder = GCN(config.hidden_size + opt["pos_dim"] + opt["dep_dim"],
                                      opt["gcn_hidden_dim"], opt["gcn_layers"],
                                      opt["input_dropout"], opt["input_dropout"])
-        self.context_decoder = Attention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
+        self.context_decoder = LabelAttention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
         self.entity_mlp = nn.Linear(config.hidden_size * 2, opt["entity_hidden_dim"])
 
         hidden_size = opt["entity_hidden_dim"] + opt["V_dim"] + opt["gcn_hidden_dim"]
@@ -198,7 +229,7 @@ class Decoder3(nn.Module):
         self.config = config
         self.embs = EmbeddingLayer(opt)
 
-        self.context_decoder = Attention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
+        self.context_decoder = LabelAttention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
         self.feature_mlp = nn.Linear(config.hidden_size * 3, opt["hidden_dim"])
 
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -217,6 +248,8 @@ class Decoder3(nn.Module):
         # context
         attn_mask = subj_pos.eq(pos_indicator) + obj_pos.eq(pos_indicator)
         attn_mask = attn_mask.unsqueeze(2)  # [B x L x 1]
+        pad_mask = pos_ids.eq(0).unsqueeze(2)
+        attn_mask = attn_mask + pad_mask
         context_feature, attn = self.context_decoder(inputs, label_embs, inputs, attn_mask)  # [B x V_dim]
 
         # Entity
@@ -243,6 +276,144 @@ class Decoder3(nn.Module):
         # scores = torch.nn.functional.softmax(scores, -1)
         return scores
 
+
+class Decoder4(nn.Module):
+    """
+    DGA => Entity Attention
+    """
+    def __init__(self, opt, config):
+        super(Decoder4, self).__init__()
+        self.opt = opt
+        self.config = config
+        self.embs = EmbeddingLayer(opt)
+        self.structure_decoder = DGAModel(opt["dga_layers"], config.hidden_size,
+                                          opt["K_dim"],
+                                          opt["attn_hidden_dim"],
+                                          opt["V_dim"],
+                                          opt["num_heads"],
+                                          opt["input_dropout"])
+        self.entity_feature_mlp = nn.Linear(config.hidden_size * 2, config.hidden_size)
+        self.structure_feature_extractor = EntityAttention(opt["K_dim"], opt["V_dim"],
+                                                           config.hidden_size, config.hidden_size)
+
+        # self.context_decoder = Attention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
+        self.feature_mlp = nn.Linear(config.hidden_size * 3, opt["hidden_dim"])
+
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.out_mlp = nn.Linear(opt["hidden_dim"], opt["label_dim"])
+        self.classifier = nn.Linear(opt["label_dim"], len(constant.LABEL_TO_ID))
+
+    def forward(self, inputs, pos_ids, dep_ids, subj_pos, obj_pos, adj):
+        pos_indicator = int(self.opt["max_seq_length"])
+        pool_type = self.opt['pooling']
+        subj_mask = subj_pos.eq(pos_indicator).eq(0).unsqueeze(2)
+        obj_mask = obj_pos.eq(pos_indicator).eq(0).unsqueeze(2)  # invert mask
+
+        attn_mask = subj_pos.eq(pos_indicator) + obj_pos.eq(pos_indicator)
+        attn_mask = attn_mask.unsqueeze(2)  # [B x L x 1]
+        pad_mask = pos_ids.eq(0).unsqueeze(2)
+        attn_mask = attn_mask + pad_mask
+
+        #labels = torch.tensor(list(range(1, 42)), dtype=torch.long).cuda()
+        #pos_embs, dep_embs, label_embs = self.embs(labels, pos_ids, dep_ids)
+
+        # Entity
+        subj_out = pool(inputs, subj_mask, type=pool_type)
+        obj_out = pool(inputs, obj_mask, type=pool_type)
+
+        # structure
+        dep_mask = get_mask_from_adj(adj)
+        entity_feature = self.entity_feature_mlp(torch.cat([subj_out, obj_out], -1))
+        structure_feature, _ = self.structure_decoder(inputs, dep_mask)
+        structure_feature, attn = self.structure_feature_extractor(inputs, entity_feature, inputs, attn_mask)
+
+        features = torch.cat([subj_out, obj_out, structure_feature], -1)
+        features = self.dropout(features)
+        features = gelu(self.feature_mlp(features))
+        features = gelu(self.out_mlp(features))
+
+        #labels = torch.tensor(list(range(0, 42)), dtype=torch.long).cuda()
+        logits = self.classifier(features)
+        return logits, structure_feature
+
+    def scorer(self, label_embs, features):
+        # label_embs : [N X E]
+        # features : [B X E]
+        batch_size = features.size()[0]
+        num_labels = label_embs.size()[0]
+        label_embs = label_embs.unsqueeze(0).repeat([batch_size, 1, 1])  # [B x N x E]
+        features = features.unsqueeze(1).repeat([1, num_labels, 1])  # [B x N x E]
+        scores = torch.sum(label_embs * features, -1)  # [B X N]
+        # scores = torch.nn.functional.softmax(scores, -1)
+        return scores
+
+
+class Decoder5(nn.Module):
+    """
+    DGA => Label Attention
+    """
+    def __init__(self, opt, config):
+        super(Decoder5, self).__init__()
+        self.opt = opt
+        self.config = config
+        self.embs = EmbeddingLayer(opt)
+        self.structure_decoder = DGAModel(opt["dga_layers"], config.hidden_size,
+                                          opt["K_dim"],
+                                          opt["attn_hidden_dim"],
+                                          opt["V_dim"],
+                                          opt["num_heads"],
+                                          opt["input_dropout"])
+        self.structure_feature_extractor = LabelAttention(opt["K_dim"], opt["V_dim"],
+                                                           config.hidden_size, opt["label_dim"])
+
+        # self.context_decoder = Attention(opt["K_dim"], opt["V_dim"], config.hidden_size, opt["label_dim"])
+        self.feature_mlp = nn.Linear(config.hidden_size * 3, opt["hidden_dim"])
+
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.out_mlp = nn.Linear(opt["hidden_dim"], opt["label_dim"])
+
+    def forward(self, inputs, pos_ids, dep_ids, subj_pos, obj_pos, adj):
+        pos_indicator = int(self.opt["max_seq_length"])
+        pool_type = self.opt['pooling']
+        subj_mask = subj_pos.eq(pos_indicator).eq(0).unsqueeze(2)
+        obj_mask = obj_pos.eq(pos_indicator).eq(0).unsqueeze(2)  # invert mask
+
+        attn_mask = subj_pos.eq(pos_indicator) + obj_pos.eq(pos_indicator)
+        attn_mask = attn_mask.unsqueeze(2)  # [B x L x 1]
+        pad_mask = pos_ids.eq(0).unsqueeze(2)
+        attn_mask = attn_mask + pad_mask
+
+        labels = torch.tensor(list(range(1, 42)), dtype=torch.long).cuda()
+        pos_embs, dep_embs, label_embs = self.embs(labels, pos_ids, dep_ids)
+
+        # Entity
+        subj_out = pool(inputs, subj_mask, type=pool_type)
+        obj_out = pool(inputs, obj_mask, type=pool_type)
+
+        # structure
+        dep_mask = get_mask_from_adj(adj)
+        structure_feature, _ = self.structure_decoder(inputs, dep_mask)
+        structure_feature, attn = self.structure_feature_extractor(inputs, label_embs, inputs, attn_mask)
+
+        features = torch.cat([subj_out, obj_out, structure_feature], -1)
+        features = self.dropout(features)
+        features = gelu(self.feature_mlp(features))
+        features = gelu(self.out_mlp(features))
+
+        labels = torch.tensor(list(range(0, 42)), dtype=torch.long).cuda()
+        logits = self.scorer(self.embs.label_emb(labels), features)
+        return logits, structure_feature
+
+    def scorer(self, label_embs, features):
+        # label_embs : [N X E]
+        # features : [B X E]
+        batch_size = features.size()[0]
+        num_labels = label_embs.size()[0]
+        label_embs = label_embs.unsqueeze(0).repeat([batch_size, 1, 1])  # [B x N x E]
+        features = features.unsqueeze(1).repeat([1, num_labels, 1])  # [B x N x E]
+        scores = torch.sum(label_embs * features, -1)  # [B X N]
+        # scores = torch.nn.functional.softmax(scores, -1)
+        return scores
 
 class BertRE(nn.Module):
     def __init__(self, opt, config):
@@ -272,24 +443,6 @@ class BertRE(nn.Module):
             loss = self.cal_match_loss(self.rel_logits, label_ids)
         return loss, hidden_features
 
-    def cal_rel_loss2(self, logits, labels):
-        # logits : [B X N]
-        batch_size = logits.size(0)
-        class_num = len(constant.LABEL_TO_ID)
-        one_hot = torch.zeros(batch_size, class_num).scatter_(1, labels.unsqueeze(1).cpu(), 1).cuda()
-        pos_mask = one_hot.float()
-        pos_loss = torch.sum(logits * pos_mask, -1)  # [B]
-        score_mask = labels.eq(0)
-        pos_loss = torch.sigmoid(pos_loss).log().masked_fill_(score_mask, 0.0)  # mask 负标签， mask位置经过log后变为0
-        pos_loss = torch.sum(pos_loss, -1)
-
-        neg_loss, _ = torch.max(logits[:, 1:], -1)
-        score_mask = labels.eq(0).eq(0)
-        neg_loss = torch.sigmoid(-1 * neg_loss).log().masked_fill_(score_mask, 0.0)  # mask正标签, mask位置经过log后变为0
-        neg_loss = torch.sum(neg_loss, -1)
-        loss = pos_loss + neg_loss
-        return loss * -1
-
     def cal_rel_loss(self, logits, labels):
         return self.criterion(logits, labels)
 
@@ -300,7 +453,7 @@ class BertRE(nn.Module):
         batch_size = logits.size(0)
         class_num = len(constant.LABEL_TO_ID)
         one_hot = torch.zeros(batch_size, class_num).scatter_(1, labels.unsqueeze(1).cpu(), 1).cuda()
-        label_scores = torch.max(logits * one_hot.float(), -1)[0]  # [B]
+        label_scores = torch.max(logits + (one_hot.eq(0).float()*-9999999.0), -1)[0]
         # 扩大到[B X N]
         label_scores = label_scores.unsqueeze(1).repeat(1, class_num)  # [B x N]
         hinge_loss = logits - label_scores + 1
@@ -310,7 +463,6 @@ class BertRE(nn.Module):
         hinge_loss = torch.mean(hinge_loss, -1)
         hinge_loss = torch.sum(hinge_loss)
         return hinge_loss
-
 
     def predict(self):
         probs = F.softmax(self.rel_logits, 1).data.cpu().numpy().tolist()
@@ -333,3 +485,28 @@ def pool(h, mask, type='max'):
     else:
         h = h.masked_fill(mask, 0)
         return h.sum(1)
+
+
+def get_mask_from_adj(adj):
+
+    mask = adj.eq(0)
+    return mask.cuda()
+
+
+def get_attn_masks(lengths, slen):
+    """
+    Generate hidden states mask, and optionally an attention mask.
+    """
+    assert lengths.max().item() <= slen
+    bs = lengths.size(0)
+
+    alen = torch.arange(slen, dtype=torch.long)
+    if torch.cuda.is_available():
+        alen = alen.cuda()
+    mask = alen < lengths[:, None]
+    mask = mask.eq(0).unsqueeze(1).repeat(1, slen, 1)
+    attn_mask = alen[None, None, :].repeat(bs, slen, 1) <= alen[None, :, None]
+    attn_mask = attn_mask.eq(0)
+    # sanity check
+    assert attn_mask.size() == (bs, slen, slen)
+    return mask, attn_mask

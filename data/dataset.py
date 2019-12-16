@@ -276,10 +276,11 @@ def get_positions(start_idx, end_idx, length):
 
 
 def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, maxlen, deprels,
-                        only_child=False, self_loop=True, deprel_edge=False):
+                        only_child=False, self_loop=True, deprel_edge=False,
+                        subtree=False, only_child_but_father=False):
     tree, dist = head_to_tree(head, words, l, prune, subj_pos, obj_pos)
     # adj 邻接边为边类型
-    adj = tree_to_adj(maxlen, l, tree, only_child, self_loop)
+    adj = tree_to_adj(maxlen, l, tree, head, only_child, self_loop, subtree, only_child_but_father)
 
     if deprel_edge:
         for i, h in enumerate(head):
@@ -388,7 +389,8 @@ def convertData(opt, features, tokenizer,
             adj, dists = inputs_to_tree_reps(feature.heads, feature.tokens, feature.length,
                                              opt['prune_k'], feature.subj_pos, feature.obj_pos,
                                              batch_max_len, feature.deprel_ids,
-                                             opt["only_child"], opt["self_loop"], opt["deprel_edge"])
+                                             opt["only_child"], opt["self_loop"], opt["deprel_edge"],
+                                             opt["subtree"], opt["only_child_but_father"])
         else:
             adj, dists = heads_to_adj(feature.heads, feature.deprel_ids, batch_max_len,
                                       feature.old_heads,
