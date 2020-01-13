@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
+import warnings
 
 
 def gelu(x):
@@ -93,9 +94,10 @@ class SelfOutput(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self, input_dim, attn_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob):
         super(EncoderLayer, self).__init__()
+        assert attn_dim * num_heads == hidden_dim
         self.input_dim = input_dim
         self.self = SelfAttention(input_dim, attn_dim, num_heads, dropout_prob)
-        self.intermediate = Intermediate(attn_dim, feedforward_dim)
+        self.intermediate = Intermediate(attn_dim*num_heads, feedforward_dim)
         self.output = SelfOutput(feedforward_dim, hidden_dim, dropout_prob)
 
     def forward(self, hidden_states, attention_mask=None):
@@ -105,18 +107,17 @@ class EncoderLayer(nn.Module):
         return layer_output, attn
 
 
-class PlainAttnLayer(nn.Module):
-    def __init__(self, input_dim, attn_dim, hidden_dim, v_dim, dropout_prob=0.0):
-        super(PlainAttnLayer, self).__init__()
+class PlainSelfLayer(nn.Module):
+    def __init__(self, input_dim, attn_dim, v_dim, dropout_prob):
+        super(PlainSelfLayer, self).__init__()
+        self.input_dim = input_dim
         self.d_k = attn_dim
         self.d_v = attn_dim
         self.W_Q = nn.Linear(input_dim, attn_dim)
         self.W_K = nn.Linear(input_dim, attn_dim)
         self.W_V = nn.Linear(input_dim, v_dim)
         self.dropout_prob = dropout_prob
-        self.W_out = nn.Linear(v_dim, hidden_dim)
         self.dropout = nn.Dropout(dropout_prob)
-        self.layerNorm = nn.LayerNorm(hidden_dim)
 
     def forward(self, Q, K, V, attn_mask):
         # Q: [B x L x hidden size]
@@ -130,49 +131,158 @@ class PlainAttnLayer(nn.Module):
         if self.dropout_prob > 0.0:
             attn = self.dropout(attn)
         WV = self.W_V(V)
-        context = torch.matmul(attn, WV) # [B x L x E]
-        context = gelu(self.W_out(context))
-        context = self.layerNorm(context)
+        selfOutput = torch.matmul(attn, WV)  # [B x L x E]
+        return selfOutput, attn
+
+
+class PlainIntermediate(nn.Module):
+    def __init__(self, v_dim, feedforward_dim):
+        super(PlainIntermediate, self).__init__()
+        self.dense = nn.Linear(v_dim, feedforward_dim)
+        self.intermediate_act_fn = gelu
+
+    def forward(self, hidden_states):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.intermediate_act_fn(hidden_states)
+        return hidden_states
+
+
+class PlainOutput(nn.Module):
+    def __init__(self, feedforward_dim, hidden_dim, dropout_prob):
+        super(PlainOutput, self).__init__()
+        self.dense = nn.Linear(feedforward_dim, hidden_dim)
+        self.LayerNorm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        if input_tensor.size()[-1] != hidden_states.size()[-1]:
+            hidden_states = self.LayerNorm(hidden_states)
+        else:
+            hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
+
+
+class PlainAttnLayer(nn.Module):
+    def __init__(self, input_dim, attn_dim, feedforward_dim, hidden_dim, v_dim, dropout_prob=0.0):
+        super(PlainAttnLayer, self).__init__()
+        if v_dim != hidden_dim:
+            warnings.warn("v dim not equal to dga hidden dim, can't use ResNet.")
+        self.self = PlainSelfLayer(input_dim, attn_dim, v_dim, dropout_prob)
+        self.inter = PlainIntermediate(v_dim, feedforward_dim)
+        self.output = PlainOutput(feedforward_dim, hidden_dim, dropout_prob)
+
+    def forward(self, Q, K, V, attn_mask):
+        # Q: [B x L x hidden size]
+        # K: [Num Label-1 x Label Emb]
+        self_output, attn = self.self(Q, K, V, attn_mask)
+        inter_output = self.inter(self_output)
+        context = self.output(inter_output, self_output)
         return context, attn
 
 
+class UnitAttnLayer(nn.Module):
+    def __init__(self, input_dim, attn_dim, feedforward_dim, hidden_dim, v_dim, dropout_prob=0.0):
+        super(UnitAttnLayer, self).__init__()
+        if v_dim*2 != hidden_dim:
+            warnings.warn("(2 x v dim) not equal to dga hidden dim, can't use ResNet.")
+        self.seq_self = PlainSelfLayer(input_dim, attn_dim, v_dim, dropout_prob)
+        self.seq_inter = PlainIntermediate(v_dim, feedforward_dim)
+        self.seq_output = PlainOutput(feedforward_dim, hidden_dim, dropout_prob)
+
+        self.dep_self = PlainSelfLayer(input_dim, attn_dim, v_dim, dropout_prob)
+        self.dep_inter = PlainIntermediate(v_dim, feedforward_dim)
+        self.dep_output = PlainOutput(feedforward_dim, hidden_dim, dropout_prob)
+
+    def forward(self, Q,  K, V, seq_mask, dep_mask):
+        seq_self, seq_attn = self.seq_self(Q, K, V, seq_mask)
+        seq_inter = self.seq_inter(seq_self)
+        seq_output = self.seq_output(seq_inter, seq_self)
+
+        dep_self, dep_attn = self.dep_self(Q, K, V, dep_mask)
+        dep_inter = self.dep_inter(dep_self)
+        dep_output = self.dep_output(dep_inter, dep_self)
+        context = torch.cat([seq_output, dep_output], -1)
+        return context, dep_attn
+
+
 class Encoder(nn.Module):
-    def __init__(self, num_layers, attn_dim, input_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob):
+    def __init__(self, num_layers, seq_input_dim, dep_input_dim,
+                 attn_dim, num_heads, hidden_dim, feedforward_dim,
+                 dropout_prob):
         super(Encoder, self).__init__()
-        self.layers = nn.ModuleList()
+        self.seq_layers = nn.ModuleList()
+        self.dep_layers = nn.ModuleList()
         for i in range(num_layers):
             if i == 0:
-                # self.layers.append(EncoderLayer(input_dim, attn_dim,
-                #                                 hidden_dim, feedforward_dim, num_heads, dropout_prob))
-                self.layers.append(PlainAttnLayer(input_dim, attn_dim,
-                                                  hidden_dim, feedforward_dim, dropout_prob))
-            else:
-                # self.layers.append(EncoderLayer(hidden_dim, attn_dim,
-                #                                 hidden_dim, feedforward_dim, num_heads, dropout_prob))
-                self.layers.append(PlainAttnLayer(hidden_dim, attn_dim,
-                                                  hidden_dim, feedforward_dim, dropout_prob))
+                self.seq_layers.append(EncoderLayer(seq_input_dim, attn_dim,
+                                                    hidden_dim, feedforward_dim,
+                                                    num_heads, dropout_prob))
+                self.dep_layers.append(EncoderLayer(dep_input_dim, attn_dim,
+                                                    hidden_dim, feedforward_dim,
+                                                    num_heads, dropout_prob))
 
-    def forward(self, inputs, attn_mask):
+                # self.layers.append(PlainAttnLayer(input_dim, attn_dim, feedforward_dim,
+                #                                   hidden_dim, v_dim, dropout_prob))
+            else:
+                self.seq_layers.append(EncoderLayer(hidden_dim, attn_dim,
+                                                    hidden_dim, feedforward_dim,
+                                                    num_heads, dropout_prob))
+                self.dep_layers.append(EncoderLayer(hidden_dim, attn_dim,
+                                                    hidden_dim, feedforward_dim,
+                                                    num_heads, dropout_prob))
+
+                # self.layers.append(PlainAttnLayer(hidden_dim, attn_dim, feedforward_dim,
+                #                                   hidden_dim, v_dim, dropout_prob))
+
+    def forward(self, seq_inputs, dep_inputs, attn_mask, dep_mask):
         enc_self_attns = []
-        seq_inputs = inputs
-        for layer in self.layers:
-            seq_outputs, seq_self_attn = layer(seq_inputs, attn_mask)
+        for i in range(len(self.dep_layers)):
+            seq_outputs, seq_self_attn = self.seq_layers[i](seq_inputs, attn_mask)
+            # dep_outputs, dep_self_attn = self.dep_layers[i](dep_inputs, dep_mask)
+            # seq_inputs = torch.cat([seq_outputs, dep_outputs], -1)
+            # dep_inputs = torch.cat([seq_outputs, dep_outputs], -1)
+            # dep_inputs = dep_outputs
             seq_inputs = seq_outputs
-            enc_self_attns.append(seq_self_attn)
+            enc_self_attns.append([seq_self_attn])
         return seq_inputs, enc_self_attns
 
 
 class DGAModel(nn.Module):
-    def __init__(self, num_layers, input_dim, attn_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob):
+    def __init__(self, num_layers, seq_input_dim, dep_input_dim,
+                 attn_dim, num_heads, hidden_dim, feedforward_dim,
+                 dropout_prob):
         super(DGAModel, self).__init__()
-        self.num_layers = num_layers
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.feedforward_dim = feedforward_dim
-        self.num_heads = num_heads
-        self.dropout_prob = dropout_prob
-        self.Encoder = Encoder(num_layers, input_dim, attn_dim, hidden_dim, feedforward_dim, num_heads, dropout_prob)
+        self.Encoder = Encoder(num_layers, seq_input_dim, dep_input_dim,
+                               attn_dim, num_heads, hidden_dim, feedforward_dim,
+                               dropout_prob)
 
-    def forward(self, inputs, dep_mask):
-        seq_outputs, self_attns = self.Encoder(inputs, dep_mask)
+    def forward(self, seq_inputs, dep_inputs, seq_mask, dep_mask):
+        seq_outputs, self_attns = self.Encoder(seq_inputs, dep_inputs, seq_mask, dep_mask)
         return seq_outputs, self_attns
+
+
+class UnitDGAModel(nn.Module):
+    def __init__(self, num_layers, input_dim, attn_dim, v_dim, hidden_dim, feedforward_dim, dropout_prob):
+        super(UnitDGAModel, self).__init__()
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            if i == 0:
+                self.layers.append(UnitAttnLayer(input_dim,
+                                                 attn_dim, feedforward_dim,
+                                                 hidden_dim, v_dim, dropout_prob))
+            else:
+
+                self.layers.append(UnitAttnLayer(hidden_dim*2,
+                                                 attn_dim, feedforward_dim,
+                                                 hidden_dim, v_dim, dropout_prob))
+
+    def forward(self, inputs, attn_mask, dep_mask):
+        enc_self_attns = []
+        seq_inputs = inputs
+        for layer in self.layers:
+            seq_outputs, seq_self_attn = layer(seq_inputs, seq_inputs, seq_inputs, attn_mask, dep_mask)
+            seq_inputs = seq_outputs
+            enc_self_attns.append(seq_self_attn)
+        return seq_inputs, enc_self_attns

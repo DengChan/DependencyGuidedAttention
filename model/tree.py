@@ -64,7 +64,7 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
 
     head = head[:len_]
     root = None
-
+    tree_root = None
     nodes = [Tree() for _ in head]
 
     for i in range(len(nodes)):
@@ -73,6 +73,7 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
         nodes[i].dist = -1 # just a filler
         if h == 0:
             root = nodes[i]
+            tree_root = nodes[i]
         else:
             nodes[h-1].add_child(nodes[i])
 
@@ -105,13 +106,6 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
             obj_ancestors.add(h - 1)
             h = head[h - 1]
         cas.intersection_update(tmp)
-    try:
-        ll = len(cas)
-    except:
-        print("tokens: %s", " ".join([str(x) for x in tokens]))
-        print("heads: %s", " ".join([str(x) for x in head]))
-        print("subj: %s", " ".join([str(x) for x in subj_pos]))
-        print("obj: %s", " ".join([str(x) for x in obj_pos]))
     # find lowest common ancestor
     if len(cas) == 1:
         lca = list(cas)[0]
@@ -133,22 +127,6 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
     # compute distance to path_nodes
     dist = [-1 if i not in path_nodes else 0 for i in range(len_)]
 
-    # 剪枝
-    if prune > -1:
-        highest_node = lca
-        nodes = [Tree() if dist[i] <= prune else None for i in range(len_)]
-        for i in range(len(nodes)):
-            if nodes[i] is None:
-                continue
-            h = head[i]
-            nodes[i].idx = i
-            nodes[i].dist = dist[i]
-            if h > 0 and i != highest_node:
-                assert nodes[h - 1] is not None
-                nodes[h - 1].add_child(nodes[i])
-
-        root = nodes[highest_node]
-
     # 与LCA的距离
     for i in range(len_):
         if dist[i] < 0:
@@ -164,6 +142,25 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
                     if j >= 0 and dist[j] < 0:
                         dist[j] = int(1e4)  # aka infinity
 
+    # 剪枝
+    if prune > 3:
+        # 保留完整的最小依存树
+        root = nodes[lca]
+    elif prune > -1:
+        highest_node = lca
+        nodes = [Tree() if dist[i] <= prune else None for i in range(len_)]
+        for i in range(len(nodes)):
+            if nodes[i] is None:
+                continue
+            h = head[i]
+            nodes[i].idx = i
+            nodes[i].dist = dist[i]
+            if h > 0 and i != highest_node:
+                assert nodes[h - 1] is not None
+                nodes[h - 1].add_child(nodes[i])
+
+        root = nodes[highest_node]
+
     # 不可及点为编码0， 其余的 + 1
     for i in range(len(dist)):
         d = dist[i]
@@ -172,9 +169,15 @@ def head_to_tree(head, tokens, len_, prune, subj_pos, obj_pos):
             dist[i] = d+1
         else:
             dist[i] = 0
-
+    try:
+        assert lca >= 0
+    except:
+        print("LCA : {}".format(lca))
+        raise AssertionError("Error")
     assert root is not None
-    return root, dist
+    assert tree_root is not None
+
+    return root, dist, tree_root
 
 
 def tree_to_adj(max_len, sent_len, tree, head,
@@ -186,7 +189,7 @@ def tree_to_adj(max_len, sent_len, tree, head,
     Convert a tree object to an (numpy) adjacency matrix.
     """
     ret = np.zeros((max_len, max_len), dtype=np.float32)
-
+    ancestor_ret = np.zeros((max_len, max_len), dtype=np.float32)
     queue = [tree]
     idx = []
     while len(queue) > 0:
@@ -208,17 +211,30 @@ def tree_to_adj(max_len, sent_len, tree, head,
             if i >= sent_len:
                 continue
             father_idx = head[i] - 1
-            ret[i, father_idx] = 1
+            if father_idx > -1:
+                ret[i, father_idx] = 1
     elif not only_child and not only_child_but_father:
         ret = ret + ret.T
 
+    # ancestor ret
+    root_idx = tree.idx
+    root_idx = head[root_idx]-1
+    for i in idx:
+        if i >= sent_len or i == -1:
+            continue
+        father_idx = head[i] - 1
+        while father_idx > -1 and father_idx != root_idx:
+            ancestor_ret[i, father_idx] = 1
+            father_idx = head[father_idx] - 1
+
     if self_loop:
         for i in idx:
-            if i >= sent_len:
+            if i >= sent_len or i == -1:
                 continue
             ret[i, i] = 1
+            ancestor_ret[i, i] = 1
 
-    return ret
+    return ret, ancestor_ret
 
 
 def tree_to_dist(sent_len, tree):

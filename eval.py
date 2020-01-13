@@ -19,11 +19,11 @@ golVars._init()
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--model_dir', type=str, default='saved_models/00',help='Directory of the model.')
+parser.add_argument('--model_dir', type=str, default='saved_models/05',help='Directory of the model.')
 parser.add_argument('--model', type=str, default='best_model.pt', help='Name of the model file.')
-parser.add_argument('--data_dir', type=str, default='dataset/tacred')
+parser.add_argument('--data_dir', type=str, default='dataset')
 parser.add_argument('--dataset', type=str, default='test', help="Evaluate on dev or test.")
-parser.add_argument('--batch_size', type=int, default=16, help='Training batch size.')
+parser.add_argument('--batch_size', type=int, default=8, help='Training batch size.')
 
 parser.add_argument('--seed', type=int, default=1234)
 parser.add_argument('--cuda', type=bool, default=torch.cuda.is_available())

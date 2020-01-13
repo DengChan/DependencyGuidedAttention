@@ -53,17 +53,8 @@ class GCNTrainer(Trainer):
         self.parameters = [p for p in self.model.parameters() if p.requires_grad]
         if opt['cuda']:
             self.model.cuda()
-        no_decay = ["bias", "LayerNorm.weight"]
-        params = [(n, p) for n, p in self.model.Decoder.named_parameters()]
-        if opt["fintune_bert"]:
-            params += [(n, p) for n, p in self.model.Encoder.named_parameters()]
 
-        optimizer_grouped_parameters = [
-            {"params": [p for n, p in params if not any(nd in n for nd in no_decay)],
-             "weight_decay": opt["weight_decay"]},
-            {"params": [p for n, p in params if any(nd in n for nd in no_decay)],
-             "weight_decay": 0.0}
-        ]
+        optimizer_grouped_parameters = self.get_params(self.opt["fintune_bert"])
         self.optimizer = AdamW(optimizer_grouped_parameters, lr=opt["lr"], eps=opt["adam_epsilon"])
         self.scheduler = get_linear_schedule_with_warmup(self.optimizer, num_warmup_steps=opt["warmup_steps"],
                                                          num_training_steps=opt["t_total"])
@@ -82,7 +73,11 @@ class GCNTrainer(Trainer):
         # l2 penalty on output representations
         if self.opt.get('pooling_l2', 0) > 0:
             rel_loss += self.opt['pooling_l2'] * (pooling_output ** 2).sum(1).mean()
-        loss_val = rel_loss.item()
+        try:
+            loss_val = rel_loss.item()
+        except:
+            print(rel_loss)
+            raise ValueError("ERROR")
         # backward
         if self.opt["fp16"]:
             with amp.scale_loss(rel_loss, self.optimizer) as scaled_loss:
@@ -110,3 +105,17 @@ class GCNTrainer(Trainer):
         labels = self.model.get_labels()
 
         return predictions, labels, probs, loss.item()
+
+    def get_params(self, fintune=True):
+        no_decay = ["bias", "LayerNorm.weight"]
+        params = [(n, p) for n, p in self.model.Decoder.named_parameters()]
+        if fintune:
+            params += [(n, p) for n, p in self.model.Encoder.named_parameters()]
+
+        optimizer_grouped_parameters = [
+            {"params": [p for n, p in params if not any(nd in n for nd in no_decay)],
+             "weight_decay": self.opt["weight_decay"]},
+            {"params": [p for n, p in params if any(nd in n for nd in no_decay)],
+             "weight_decay": 0.0}
+        ]
+        return optimizer_grouped_parameters

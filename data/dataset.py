@@ -278,10 +278,12 @@ def get_positions(start_idx, end_idx, length):
 def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, maxlen, deprels,
                         only_child=False, self_loop=True, deprel_edge=False,
                         subtree=False, only_child_but_father=False):
-    tree, dist = head_to_tree(head, words, l, prune, subj_pos, obj_pos)
+    tree, dist, whole_tree = head_to_tree(head, words, l, prune, subj_pos, obj_pos)
     # adj 邻接边为边类型
-    adj = tree_to_adj(maxlen, l, tree, head, only_child, self_loop, subtree, only_child_but_father)
-
+    adj, ancestor_adj = tree_to_adj(maxlen, l, tree, head,
+                                    only_child, self_loop, subtree, only_child_but_father)
+    whole_adj, ancestor_whole_adj = tree_to_adj(maxlen, l, whole_tree, head,
+                                                only_child, self_loop, subtree, only_child_but_father)
     if deprel_edge:
         for i, h in enumerate(head):
             # 如果被剪枝了就跳过
@@ -296,7 +298,7 @@ def inputs_to_tree_reps(head, words, l, prune, subj_pos, obj_pos, maxlen, deprel
                 # 如果自环，则把边类型设为自环的deprel id
                 adj[i, i] = constant.DEPREL_TO_ID[constant.SELF_DEP]
 
-    return adj, dist
+    return adj, ancestor_adj, whole_adj, ancestor_whole_adj, dist
 
 
 def heads_to_adj(heads, deprels,  maxlen, old_heads, subj_pos, obj_pos,
@@ -380,17 +382,21 @@ def convertData(opt, features, tokenizer,
     input_ids_lst, input_masks_lst, subword_masks_lst, segment_ids_lst, label_ids, ner_ids_lst, pos_ids_lst,\
     deprel_ids_lst, adjs, dists_lst, bg_list_lst, ed_list_lst, subj_type_ids, obj_type_ids, \
     subj_pos_lst, obj_pos_lst = [list() for _ in range(16)]
-
+    whole_adj_lst = []
+    ancestor_adj_lst = []
+    lca_index = 0
     for feature in features:
         # 生成邻接矩阵,
         # max(l, max_seq_length-2) ： 如果 l> max_seq_length-2保证矩阵是完整的， 如果l < max_seq_length-2, 保证矩阵长度max_seq_length-2
         # len(dists) == l 仍需要pad
         if opt["subword_to_children"]:
-            adj, dists = inputs_to_tree_reps(feature.heads, feature.tokens, feature.length,
-                                             opt['prune_k'], feature.subj_pos, feature.obj_pos,
-                                             batch_max_len, feature.deprel_ids,
-                                             opt["only_child"], opt["self_loop"], opt["deprel_edge"],
-                                             opt["subtree"], opt["only_child_but_father"])
+            adj, ancestor_adj, whole_adj, ancestor_whole_adj, dists = \
+                inputs_to_tree_reps(feature.heads, feature.tokens, feature.length,
+                                    opt['prune_k'], feature.subj_pos, feature.obj_pos,
+                                    batch_max_len, feature.deprel_ids,
+                                    opt["only_child"], opt["self_loop"], opt["deprel_edge"],
+                                    opt["subtree"], opt["only_child_but_father"])
+            lca_index += 1 # 算上 cls的偏移值
         else:
             adj, dists = heads_to_adj(feature.heads, feature.deprel_ids, batch_max_len,
                                       feature.old_heads,
@@ -489,7 +495,8 @@ def convertData(opt, features, tokenizer,
 
         # 单独处理 adj
         adj = np.pad(adj, ((1, 1), (1, 1)), 'constant', constant_values=(0.0, 0.0))
-
+        whole_adj = np.pad(whole_adj, ((1, 1), (1, 1)), 'constant', constant_values=(0.0, 0.0))
+        ancestor_whole_adj = np.pad(ancestor_whole_adj, ((1, 1), (1, 1)), 'constant', constant_values=(0.0, 0.0))
         subj_pos = [p + opt["max_seq_length"] for p in subj_pos]
         obj_pos = [p + opt["max_seq_length"] for p in obj_pos]
 
@@ -498,6 +505,8 @@ def convertData(opt, features, tokenizer,
         assert len(segment_ids) == batch_max_len + 2
         assert len(dists) == batch_max_len + 2
         assert adj.shape[0] == batch_max_len + 2
+        assert whole_adj.shape[0] == batch_max_len + 2
+        assert ancestor_whole_adj.shape[0] == batch_max_len + 2
 
         assert len(ner_ids) == batch_max_len + 2
         assert len(pos_ids) == batch_max_len + 2
@@ -519,12 +528,19 @@ def convertData(opt, features, tokenizer,
             logger.info("subj_position: %s", " ".join([str(x) for x in subj_pos]))
             logger.info("LCA distances: %s", " ".join([str(x) for x in dists]))
             logger.info("Adj(front 10 node): {}".format(adj[:10, :10]))
+            logger.info("Adj(front 10 node): {}".format(whole_adj[:10, :10]))
+            logger.info("Adj(front 10 node): {}".format(ancestor_whole_adj[:10, :10]))
             feature_cnt += 1
 
         label_ids.append(feature.label_id)
+
         subj_type_ids.append(constant.SUBJ_NER_TO_ID[feature.subj_type])
         obj_type_ids.append(constant.OBJ_NER_TO_ID[feature.obj_type])
+
         adjs.append(adj)
+        whole_adj_lst.append(whole_adj)
+        ancestor_adj_lst.append(ancestor_whole_adj)
+
         bg_list_lst.append(feature.bg_list)
         ed_list_lst.append(feature.ed_list)
 
@@ -549,12 +565,15 @@ def convertData(opt, features, tokenizer,
     pos_ids_lst = torch.tensor(pos_ids_lst, dtype=torch.long).cuda()
     deprel_ids_lst = torch.tensor(deprel_ids_lst, dtype=torch.long).cuda()
     adjs = torch.tensor(adjs, dtype=torch.float).cuda()
+    whole_adj_lst = torch.tensor(whole_adj_lst, dtype=torch.float).cuda()
+    ancestor_adj_lst = torch.tensor(ancestor_adj_lst, dtype=torch.float).cuda()
+
     subj_pos_lst = torch.tensor(subj_pos_lst, dtype=torch.long).cuda()
     obj_pos_lst = torch.tensor(obj_pos_lst, dtype=torch.long).cuda()
     label_ids = torch.tensor(label_ids, dtype=torch.long).cuda()
-
     return input_ids_lst, input_masks_lst, subword_masks_lst, segment_ids_lst, label_ids, ner_ids_lst, pos_ids_lst, \
-           deprel_ids_lst, adjs, dists_lst, subj_pos_lst, obj_pos_lst, bg_list_lst, ed_list_lst, subj_type_ids, obj_type_ids
+           deprel_ids_lst, adjs, dists_lst, subj_pos_lst, obj_pos_lst, \
+           bg_list_lst, ed_list_lst, subj_type_ids, obj_type_ids, whole_adj_lst, ancestor_adj_lst
 
 
 def tokenizeWord(word, tokenizer, canTokenize=True):

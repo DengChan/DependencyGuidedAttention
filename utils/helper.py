@@ -6,6 +6,7 @@ import os
 import subprocess
 import json
 import argparse
+import pickle
 
 ### IO
 def check_dir(d):
@@ -58,8 +59,19 @@ class FileLogger(object):
         if header is not None:
             with open(filename, 'w') as out:
                 print(header, file=out)
-    
+
     def log(self, message):
         with open(self.filename, 'a') as out:
             print(message, file=out)
+
+
+def save_tokenizer(path:str, tokenizer):
+    with open(path,'wb') as f :
+        pickle.dump(tokenizer,f)
+
+
+def load_tokenizer(path):
+    with open(path,'rb') as f:
+        t = pickle.load(f)
+    return t
 

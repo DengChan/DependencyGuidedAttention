@@ -51,27 +51,33 @@ parser.add_argument('--data_dir', type=str, default='dataset/')
 parser.add_argument('--fintune_bert', type=bool, default=True, help="fintune bert or not")
 
 # Input
+parser.add_argument('--position_dim', type=int, default=30, help='POS embedding dimension.')
 parser.add_argument('--ner_dim', type=int, default=50, help='NER embedding dimension.')
-parser.add_argument('--pos_dim', type=int, default=50, help='POS embedding dimension.')
+parser.add_argument('--pos_dim', type=int, default=30, help='POS embedding dimension.')
 parser.add_argument('--dep_dim', type=int, default=50, help='dependency embedding dimension.')
-parser.add_argument('--dist_dim', type=int, default=56, help='LCA distance embedding dimension.')
+parser.add_argument('--dist_dim', type=int, default=30, help='LCA distance embedding dimension.')
 parser.add_argument('--label_dim', type=int, default=128, help='64 best, label embedding dimension.')
 parser.add_argument('--input_dropout', type=float, default=0.1, help='Input dropout rate.')
 
 
 # DGA & Attention
-parser.add_argument('--dga_layers', type=int, default=2, help='gcn layers.')
-parser.add_argument('--K_dim', type=int, default=64, help='K dimension.')
-parser.add_argument('--V_dim', type=int, default=128, help='V dimension.')
-parser.add_argument('--num_heads', type=int, default=1, help='num of heads')
-parser.add_argument('--attn_hidden_dim', type=int, default=256, help='dga hidden dim dimension.')
+parser.add_argument('--dga_layers', type=int, default=1, help='gcn layers.')
+parser.add_argument('--K_dim', type=int, default=32, help='K dimension.')
+parser.add_argument('--V_dim', type=int, default=64, help='V dimension.')
+parser.add_argument('--feedforward_dim', type=int, default=512, help='V dimension.')
+parser.add_argument('--num_heads', type=int, default=8, help='num of heads')
+parser.add_argument('--dga_hidden_dim', type=int, default=256, help='dga hidden dim dimension.')
+
 
 # Entity
 parser.add_argument('--entity_hidden_dim', type=int, default=128, help='hidden state size.')
 
 # Output
-parser.add_argument('--hidden_dim', type=int, default=512, help='output hidden state size.')
+parser.add_argument('--hidden_dim', type=int, default=256, help='output hidden state size.')
+
+# Loss
 parser.add_argument('--match_loss_weight', type=float, default=0.0, help='match loss weight.')
+parser.add_argument('--neg_weight', type=float, default=0.9, help='match loss weight.')
 
 parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
 
@@ -86,10 +92,10 @@ parser.add_argument('--subword_to_children', type=bool, default=True,
                     help="treat subword to first subword's child in dep tress")
 parser.add_argument('--subtree', type=bool, default=True,
                     help="use subtree dga mask")
-parser.add_argument('--only_child', type=bool, default=False, help="whether use double direction edge.")
-parser.add_argument('--only_child_but_father', type=bool, default=True, help="whether use double direction edge.")
+parser.add_argument('--only_child', type=bool, default=True, help="whether use double direction edge.")
+parser.add_argument('--only_child_but_father', type=bool, default=False, help="whether use double direction edge.")
 parser.add_argument('--deprel_edge', type=bool, default=False, help="whether use deprel info on edge")
-parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
+parser.add_argument('--prune_k', default=99, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
 
 
 parser.add_argument('--conv_l2', type=float, default=0.0, help='L2-weight decay on conv layers only.')
@@ -255,6 +261,7 @@ for epoch in train_iterator:
     logger.info("epoch {}: train_loss = {:.6f}, dev_loss = {:.6f}, dev_f1 = {:.4f}".format(epoch,
                                                                                            train_loss, dev_loss, dev_f1))
     dev_score = dev_f1
+    dev_score_history.append(dev_score)
     file_logger.log("{}\t{:.6f}\t{:.6f}\t{:.4f}\t{:.4f}".format(epoch, train_loss, dev_loss,
                                                                 dev_score, max([dev_score] + dev_score_history)))
 
