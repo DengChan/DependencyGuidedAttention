@@ -3,7 +3,8 @@ Train a model on TACRED.
 """
 
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+import json
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import time
 import pickle
@@ -15,7 +16,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tqdm import trange, tqdm
 
 from model.trainer import GCNTrainer
-from model.bert import BertConfig, BertTokenizer
+from model.bert import AlbertTokenizer, AlbertConfig
 from utils import torch_utils, scorer, constant, helper
 from data.dataset import RelationDataset, collate_fn
 
@@ -24,6 +25,7 @@ from torch.nn import CrossEntropyLoss
 
 import logging
 from utils import golVars
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +38,17 @@ parser.add_argument('--model_file', type=str, default="",
 
 parser.add_argument("--model_name_or_path", default="",
                     type=str, help="Path to pre-trained model")
-parser.add_argument("--config_name", default="", type=str,
+parser.add_argument("--config_name", default="albert-base-v2", type=str,
                     help="Pretrained config name or path if not the same as model_name")
-parser.add_argument("--tokenizer_name", default="", type=str,
+parser.add_argument("--tokenizer_name", default="albert-base-v2", type=str,
                         help="Pretrained tokenizer name or path if not the same as model_name")
-parser.add_argument("--cache_dir", default="", type=str,
+parser.add_argument("--cache_dir", default="pretrained/albert", type=str,
                     help="Where do you want to store the pre-trained models downloaded from s3")
 parser.add_argument("--max_seq_length", default=300, type=int,
                     help="The maximum total input sequence length after tokenization. Sequences longer "
                          "than this will be truncated, sequences shorter will be padded.")
 
-parser.add_argument('--data_dir', type=str, default='dataset/')
+parser.add_argument('--data_dir', type=str, default='dataset/test')
 
 parser.add_argument('--fintune_bert', type=bool, default=True, help="fintune bert or not")
 
@@ -61,7 +63,7 @@ parser.add_argument('--input_dropout', type=float, default=0.1, help='Input drop
 
 
 # DGA & Attention
-parser.add_argument('--dga_layers', type=int, default=1, help='gcn layers.')
+parser.add_argument('--dga_layers', type=int, default=3, help='gcn layers.')
 parser.add_argument('--K_dim', type=int, default=32, help='K dimension.')
 parser.add_argument('--V_dim', type=int, default=64, help='V dimension.')
 parser.add_argument('--feedforward_dim', type=int, default=512, help='V dimension.')
@@ -76,7 +78,7 @@ parser.add_argument('--entity_hidden_dim', type=int, default=128, help='hidden s
 parser.add_argument('--hidden_dim', type=int, default=256, help='output hidden state size.')
 
 # Loss
-parser.add_argument('--match_loss_weight', type=float, default=0.0, help='match loss weight.')
+parser.add_argument('--match_loss_weight', type=float, default=1.0, help='match loss weight.')
 parser.add_argument('--neg_weight', type=float, default=0.9, help='match loss weight.')
 
 parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
@@ -92,10 +94,10 @@ parser.add_argument('--subword_to_children', type=bool, default=True,
                     help="treat subword to first subword's child in dep tress")
 parser.add_argument('--subtree', type=bool, default=True,
                     help="use subtree dga mask")
-parser.add_argument('--only_child', type=bool, default=True, help="whether use double direction edge.")
-parser.add_argument('--only_child_but_father', type=bool, default=False, help="whether use double direction edge.")
+parser.add_argument('--only_child', type=bool, default=False, help="whether use double direction edge.")
+parser.add_argument('--only_child_but_father', type=bool, default=True, help="whether use double direction edge.")
 parser.add_argument('--deprel_edge', type=bool, default=False, help="whether use deprel info on edge")
-parser.add_argument('--prune_k', default=99, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
+parser.add_argument('--prune_k', default=-1, type=int, help='Prune the dependency tree to <= K distance off the dependency path; set to -1 for no pruning.')
 
 
 parser.add_argument('--conv_l2', type=float, default=0.0, help='L2-weight decay on conv layers only.')
@@ -113,7 +115,7 @@ parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight deca
 parser.add_argument("--adam_epsilon", default=1e-8, type=float,
                     help="Epsilon for Adam optimizer.")
 parser.add_argument('--num_epoch', type=int, default=25, help='Number of total training epochs.')
-parser.add_argument('--batch_size', type=int, default=32, help='Training batch size.')
+parser.add_argument('--batch_size', type=int, default=8, help='Training batch size.')
 parser.add_argument('--max_grad_norm', type=float, default=10.0, help='Gradient clipping.')
 
 parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup over warmup_steps.")
@@ -121,7 +123,7 @@ parser.add_argument("--warmup_steps", default=0, type=int, help="Linear warmup o
 parser.add_argument('--log', type=str, default='logs.txt', help='Write training log to file.')
 parser.add_argument('--save_epoch', type=int, default=30, help='Save model checkpoints every k epochs.')
 parser.add_argument('--save_dir', type=str, default='./saved_models', help='Root dir for saving models.')
-parser.add_argument('--id', type=str, default='18', help='Model ID under which to save models.')
+parser.add_argument('--id', type=str, default='0', help='Model ID under which to save models.')
 parser.add_argument('--info', type=str, default='', help='Optional info for the experiment.')
 
 parser.add_argument('--seed', type=int, default=42)
@@ -161,13 +163,16 @@ opt["model_name_or_path"] = args.model_name_or_path
 pad_token_label_id = CrossEntropyLoss().ignore_index
 
 # load config and tokenzier
-config = BertConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
-                                    num_labels=len(constant.LABEL_TO_ID),
+config = AlbertConfig.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
                                     cache_dir=args.cache_dir if args.cache_dir else None)
-tokenizer = BertTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
-                                          do_lower_case=args.do_lower_case,
+
+tokenizer = AlbertTokenizer.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path,
+                                          do_lower_case=True,
                                           cache_dir=args.cache_dir if args.cache_dir else None)
 
+with open("vocab.txt",'a',encoding='utf-8') as f:
+    for k, v in tokenizer.vocab.items():
+        f.write(k+"\n")
 
 model_id = opt['id'] if len(opt['id']) > 1 else '0' + opt['id']
 model_save_dir = opt['save_dir'] + '/' + model_id

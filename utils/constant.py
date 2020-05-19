@@ -40,3 +40,28 @@ ADDITIONAL_WORDS=["SUBJ-ORGANIZATION", "SUBJ-PERSON", "OBJ-PERSON", "OBJ-ORGANIZ
                   "OBJ-DURATION", "OBJ-NATIONALITY", "OBJ-CAUSE_OF_DEATH", "OBJ-CRIMINAL_CHARGE", "OBJ-RELIGION",
                   "OBJ-URL", "OBJ-IDEOLOGY", "WEB-URL",
                   "E-MAIL", "E-CODE", "E-NUM"]
+
+ADDITIONAL_WORDS_DICT=\
+    {"SUBJ-ORGANIZATION": "▁grenoble",
+                  "SUBJ-PERSON": "▁dooley",
+                  "OBJ-PERSON": "▁orpheus",
+                  "OBJ-ORGANIZATION": "▁jstor",
+                  "OBJ-DATE": "▁srinivas",
+                  "OBJ-NUMBER": "▁celaena",
+                  "OBJ-TITLE": "▁indira",
+                  "OBJ-COUNTRY": "▁aarhus",
+                  "OBJ-LOCATION": "▁tuvalu",
+                  "OBJ-CITY": "▁travancore",
+                  "OBJ-MISC": "▁couture",
+                  "OBJ-STATE_OR_PROVINCE": "▁shanxi",
+                  "OBJ-DURATION": "▁jaffa",
+                  "OBJ-NATIONALITY": "▁canucks",
+                  "OBJ-CAUSE_OF_DEATH": "▁joanna",
+                  "OBJ-CRIMINAL_CHARGE": "▁klaus",
+                  "OBJ-RELIGION": "▁xinjiang",
+                  "OBJ-URL": "▁mendelssohn",
+                  "OBJ-IDEOLOGY":"▁zelda",
+                  "WEB-URL":"▁atletico",
+                  "E-MAIL":"▁matthias",
+                  "E-CODE":"▁kensington",
+                  "E-NUM":"▁irwin"}

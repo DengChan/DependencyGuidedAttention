@@ -7,7 +7,7 @@ import math
 
 from utils import constant
 
-from model.bert import BertModel
+from model.bert import AlbertModel
 from model.GCN import GCN
 from model.DGA import DGAModel, UnitDGAModel
 from model.BiDGA import BiDGAModel
@@ -94,14 +94,17 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
         self.opt = opt
         self.config = config
-        self.bert = BertModel(config)
+        self.bert = AlbertModel(config)
         self.load_bert_model()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def load_bert_model(self):
-        self.bert = self.bert.from_pretrained(self.opt["model_name_or_path"],
-                                              config=self.config,
+        # self.bert = self.bert.from_pretrained(self.opt["model_name_or_path"],
+        #                                       config=self.config,
+        #                                       cache_dir=self.opt["cache_dir"] if self.opt["cache_dir"] else None)
+        self.bert = self.bert.from_pretrained("albert-base-v2",
                                               cache_dir=self.opt["cache_dir"] if self.opt["cache_dir"] else None)
+
         print("Load Bert Model successfully")
 
     def forward(self, input_ids, attention_mask, token_type_ids,

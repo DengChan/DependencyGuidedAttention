@@ -253,14 +253,19 @@ def convert_examples_to_features(opt,
         obj_pos = get_positions(obj_start, obj_end, l)
 
         seq_len = len(tokens)
-        assert len(subword_mask) == len(tokens)
-        assert len(ner_ids) == seq_len
-        assert len(pos_ids) == seq_len
-        assert len(subj_pos) == seq_len
-        assert len(obj_pos) == seq_len
-        assert len(heads) == seq_len
-        assert len(deprel_ids) == seq_len
-        assert len(old_end2new_end) == len(example.head)
+
+        try:
+            assert len(subword_mask) == len(tokens)
+            assert len(ner_ids) == seq_len
+            assert len(pos_ids) == seq_len
+            assert len(subj_pos) == seq_len
+            assert len(obj_pos) == seq_len
+            assert len(heads) == seq_len
+            assert len(deprel_ids) == seq_len
+            assert len(old_end2new_end) == len(example.head)
+        except:
+            print("ERROR")
+            raise ValueError("Length not same")
 
         features.append(InputFeatures(tokens, seq_len, subword_mask, label_id, ner_ids, pos_ids, deprel_ids,
                                       subj_pos, obj_pos, old_index2new_index, old_end2new_end,
@@ -577,12 +582,13 @@ def convertData(opt, features, tokenizer,
 
 
 def tokenizeWord(word, tokenizer, canTokenize=True):
-    if word in constant.ADDITIONAL_WORDS or word in tokenizer.vocab:
-        return [word]
-    elif word[0] + word[1:] in tokenizer.vocab:
-        return [word[0] + word[1:]]
-    elif word.lower() in tokenizer.vocab:
-        return [word.lower()]
+    if word in constant.ADDITIONAL_WORDS :
+        return [constant.ADDITIONAL_WORDS_DICT[word]]
+    # elif word[0] + word[1:] in tokenizer.vocab:
+    #     return [word[0] + word[1:]]
+    # elif word.lower() in tokenizer.vocab:
+    #     return [word.lower()]
+    word = word.replace("``", '"').replace("''", '"').replace('´', "'").replace('¯', '-')
     if canTokenize:
         word_tokens = tokenizer.tokenize(word)
     else:
@@ -591,7 +597,7 @@ def tokenizeWord(word, tokenizer, canTokenize=True):
     #     print(word)
     #     print(word_tokens)
     #     print("================================================")
-    if len(word_tokens) >= 4:
+    if len(word_tokens) >= 7:
         word_tokens = [word]
     return word_tokens
 

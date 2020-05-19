@@ -1,7 +1,7 @@
 """
 A trainer class.
 """
-from apex import amp
+
 import torch
 
 from model.DGA import DGAModel
@@ -58,10 +58,6 @@ class GCNTrainer(Trainer):
         self.optimizer = AdamW(optimizer_grouped_parameters, lr=opt["lr"], eps=opt["adam_epsilon"])
         self.scheduler = get_linear_schedule_with_warmup(self.optimizer, num_warmup_steps=opt["warmup_steps"],
                                                          num_training_steps=opt["t_total"])
-        # Prepare optimizer and schedule (linear warmup and decay)
-        if opt["fp16"]:
-            self.model, optimizer = amp.initialize(self.model, self.optimizer, opt_level=opt["fp16_opt_level"])
-
         self.model.zero_grad()
 
     def update(self, batch, step):
@@ -78,18 +74,11 @@ class GCNTrainer(Trainer):
         except:
             print(rel_loss)
             raise ValueError("ERROR")
-        # backward
-        if self.opt["fp16"]:
-            with amp.scale_loss(rel_loss, self.optimizer) as scaled_loss:
-                scaled_loss.backward()
-        else:
-            rel_loss.backward()
+
+        rel_loss.backward()
 
         if (step + 1) % self.opt["gradient_accumulation_steps"] == 0:
-            if self.opt["fp16"]:
-                torch.nn.utils.clip_grad_norm_(amp.master_params(self.optimizer), self.opt['max_grad_norm'])
-            else:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt['max_grad_norm'])
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt['max_grad_norm'])
 
         self.scheduler.step()
         self.optimizer.step()
